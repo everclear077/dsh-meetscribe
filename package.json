@@ -1,0 +1,96 @@
+{
+  "name": "dsh-meetscribe",
+  "version": "0.1.0",
+  "description": "Local-first meeting transcription, speaker management and polished Word minutes for DeepSeek Harness.",
+  "type": "module",
+  "main": "lib/index.js",
+  "icon": "./icon.svg",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/everclear077/dsh-meetscribe.git"
+  },
+  "homepage": "https://github.com/everclear077/dsh-meetscribe#readme",
+  "bugs": {
+    "url": "https://github.com/everclear077/dsh-meetscribe/issues"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "dsh": ">=0.1.7 <0.3.0-0"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "native/",
+    "docs/",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "sample:word": "npm run build && node scripts/generate-word-sample.mjs",
+    "sample:ui": "node scripts/ui-gallery.mjs",
+    "prepack": "npm run build",
+    "verify": "npm run typecheck && npm test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-shortcuts"
+      ]
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.5",
+    "docx": "^9.5.1",
+    "sherpa-onnx": "^1.13.6",
+    "sherpa-onnx-node": "1.13.6"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@types/node": "^24.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "esbuild": "^0.27.0",
+    "playwright": "^1.56.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "meeting-minutes",
+    "speech-to-text",
+    "speaker-diarization",
+    "sherpa-onnx",
+    "docx",
+    "local-first"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
