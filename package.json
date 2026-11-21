@@ -1,6 +1,6 @@
 {
   "name": "dsh-meetscribe",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Local-first meeting transcription, speaker management, searchable Word minutes and a document workspace for DeepSeek Harness.",
   "type": "module",
   "main": "lib/index.js",

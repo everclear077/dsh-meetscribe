@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-22
+
 ### Added
 
 - ASR、VAD 和声纹模型全部由插件直接下载到 `%LOCALAPPDATA%\dsh-meetscribe\models`，不再依赖外部应用预先安装模型。
