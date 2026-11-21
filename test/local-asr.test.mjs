@@ -3,13 +3,13 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createAsrRuntime, pcmToSamples, resolveOrcaModelPaths } from '../lib/index.js'
+import { createAsrRuntime, pcmToSamples, resolveLocalModelPaths } from '../lib/index.js'
 
 const capabilities = { nativeSampleRate: 16000, maxAudioMs: 30000, supportsStreaming: false }
 const tick = () => new Promise((resolve) => setImmediate(resolve))
 
 async function modelFiles(t) {
-  const directory = await mkdtemp(join(tmpdir(), 'meetscribe-orca-runtime-'))
+  const directory = await mkdtemp(join(tmpdir(), 'meetscribe-local-runtime-'))
   const modelPaths = { asr: join(directory, 'asr.gguf'), vad: join(directory, 'vad.gguf') }
   await writeFile(modelPaths.asr, 'test-model')
   await writeFile(modelPaths.vad, 'test-vad')
@@ -28,15 +28,15 @@ function fakeAsrModel(transcribe) {
   }
 }
 
-test('Orca paths use the installed SenseVoice and Silero GGUF files', () => {
-  const root = join(tmpdir(), 'orca-app-data')
-  const paths = resolveOrcaModelPaths(root)
-  assert.equal(paths.asr, join(root, 'orca', 'speech-models', 'sense-voice-zh-en-ja-ko-yue', 'SenseVoiceSmall-Q8_0.gguf'))
-  assert.equal(paths.vad, join(root, 'orca', 'speech-models', 'silero-vad-v6.2', 'silero-vad-v6.2-F32.gguf'))
-  assert.equal(resolveOrcaModelPaths('').asr, '')
+test('local model paths stay inside the plugin model directory', () => {
+  const root = join(tmpdir(), 'meetscribe-models')
+  const paths = resolveLocalModelPaths(root)
+  assert.equal(paths.asr, join(root, 'asr', 'SenseVoiceSmall-Q8_0.gguf'))
+  assert.equal(paths.vad, join(root, 'vad', 'silero-vad-v6.2-F32.gguf'))
+  assert.throws(() => resolveLocalModelPaths(''), /模型目录不能为空/)
 })
 
-test('Orca partial snapshots and final transcription preserve raw and corrected text', async (t) => {
+test('Local partial snapshots and final transcription preserve raw and corrected text', async (t) => {
   const modelPaths = await modelFiles(t)
   const calls = []
   const model = fakeAsrModel(async (pcm, options) => {
@@ -75,7 +75,7 @@ test('Orca partial snapshots and final transcription preserve raw and corrected 
   assert.equal(calls.length, 2, 'final retries reuse the cached raw model result')
 })
 
-test('concurrent Orca final requests share one native inference', async (t) => {
+test('concurrent Local final requests share one native inference', async (t) => {
   const modelPaths = await modelFiles(t)
   let release
   let calls = 0
@@ -118,7 +118,7 @@ test('reset prevents an in-flight final from polluting a reused epoch', async (t
   assert.equal(calls, 2)
 })
 
-test('Orca VAD detect uses native frame probabilities and resets sessions', async (t) => {
+test('Local VAD detect uses native frame probabilities and resets sessions', async (t) => {
   const modelPaths = await modelFiles(t)
   let resets = 0
   let disposed = false
@@ -142,8 +142,69 @@ test('Orca VAD detect uses native frame probabilities and resets sessions', asyn
   assert.equal(disposed, true)
 })
 
-test('missing Orca model gives an actionable error without invoking the loader', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'meetscribe-orca-missing-'))
+test('replaced Local ASR model waits for active inference before reloading', async (t) => {
+  const modelPaths = await modelFiles(t)
+  let release
+  let loads = 0
+  const disposed = []
+  const runtime = createAsrRuntime({ modelPaths, senseITN: () => true, broadcast: () => undefined }, {
+    loadAsrModel: async () => {
+      const id = ++loads
+      const model = fakeAsrModel(() => id === 1
+        ? new Promise((resolve) => { release = () => resolve({ text: '旧模型结果' }) })
+        : Promise.resolve({ text: '新模型结果' }))
+      return { ...model, dispose: () => disposed.push(id) }
+    },
+  })
+  t.after(() => runtime.dispose())
+  assert.equal(await runtime.retryModel('asr'), true)
+  assert.equal(await runtime.retryModel('asr'), true)
+  assert.equal(loads, 1)
+  const pending = runtime.feed('meeting', new Float32Array(8000), true, 0, 0)
+  await tick()
+  const reloaded = runtime.retryModel('asr', true)
+  await tick()
+  assert.deepEqual(disposed, [])
+  release()
+  assert.equal((await pending).text, '旧模型结果')
+  assert.equal(await reloaded, true)
+  assert.equal(loads, 2)
+  assert.deepEqual(disposed, [1])
+  const fresh = await runtime.feed('fresh', new Float32Array(8000), true, 0, 0)
+  assert.equal(fresh.text, '新模型结果')
+})
+
+test('replaced Local VAD model disposes old sessions and reloads', async (t) => {
+  const modelPaths = await modelFiles(t)
+  let loads = 0
+  const disposedModels = []
+  const disposedSessions = []
+  const runtime = createAsrRuntime({ modelPaths, senseITN: () => true, broadcast: () => undefined }, {
+    loadVadModel: async () => {
+      const id = ++loads
+      return {
+        createVadSession: () => ({
+          async streamFeed() { return { probs: [0.8], firstFrame: 0, segments: [] } },
+          async streamReset() {},
+          dispose() { disposedSessions.push(id) },
+        }),
+        dispose() { disposedModels.push(id) },
+      }
+    },
+  })
+  t.after(() => runtime.dispose())
+  assert.deepEqual(await runtime.detect('meeting', new Float32Array(1600)), { isSpeech: true })
+  assert.equal(await runtime.retryModel('vad'), true)
+  assert.equal(loads, 1)
+  assert.equal(await runtime.retryModel('vad', true), true)
+  assert.equal(loads, 2)
+  assert.deepEqual(disposedSessions, [1])
+  assert.deepEqual(disposedModels, [1])
+  assert.deepEqual(await runtime.detect('meeting', new Float32Array(1600)), { isSpeech: true })
+})
+
+test('missing Local model gives an actionable error without invoking the loader', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'meetscribe-local-missing-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   let loads = 0
   const runtime = createAsrRuntime({
@@ -152,7 +213,7 @@ test('missing Orca model gives an actionable error without invoking the loader',
     broadcast: () => undefined,
   }, { loadAsrModel: async () => { loads++; return fakeAsrModel(async () => ({ text: '' })) } })
   t.after(() => runtime.dispose())
-  await assert.rejects(runtime.feed('meeting', new Float32Array(8000), false, 0, 0), /未找到 Orca 识别模型/)
+  await assert.rejects(runtime.feed('meeting', new Float32Array(8000), false, 0, 0), /未找到本地识别模型/)
   assert.equal(loads, 0)
 })
 

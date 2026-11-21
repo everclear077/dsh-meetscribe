@@ -40,15 +40,15 @@ export function decodePcm16Wav(bytes) {
 }
 
 async function main() {
-  const modelPath = process.env.ORCA_ASR_MODEL || join(
-    process.env.APPDATA || '',
-    'orca',
-    'speech-models',
-    'sense-voice-zh-en-ja-ko-yue',
+  const modelPath = process.env.MEETSCRIBE_ASR_MODEL || join(
+    process.env.LOCALAPPDATA || '',
+    'dsh-meetscribe',
+    'models',
+    'asr',
     'SenseVoiceSmall-Q8_0.gguf',
   )
   const files = process.argv.slice(2)
-  if (files.length === 0) throw new Error('Usage: node scripts/smoke-orca-asr.mjs <16k-mono-pcm16.wav> [...more.wav]')
+  if (files.length === 0) throw new Error('Usage: node scripts/smoke-local-asr.mjs <16k-mono-pcm16.wav> [...more.wav]')
   const startedAt = performance.now()
   const model = await TranscribeModel.load(modelPath, { backend: 'cpu' })
   const loadMs = Math.round(performance.now() - startedAt)

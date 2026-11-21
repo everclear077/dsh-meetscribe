@@ -33,7 +33,7 @@ export function MeetingSettings(): ReactNode {
     void api.models().then(setModels).catch(() => undefined)
     const events = new EventSource('/meetscribe/events')
     const update = (): void => { void api.models().then(setModels).catch(() => undefined) }
-    events.addEventListener('asr-progress', update); events.addEventListener('asr-ready', update); events.addEventListener('asr-error', update)
+    events.addEventListener('asr-progress', update); events.addEventListener('asr-ready', update); events.addEventListener('asr-error', update); events.addEventListener('models', update)
     return () => events.close()
   }, [])
   const save = async (patch: Partial<MeetScribeSettings>): Promise<boolean> => {
@@ -65,8 +65,8 @@ export function MeetingSettings(): ReactNode {
     }
   }
   const download = async (): Promise<void> => {
-    setBusy(true); setMessage('正在检查 Orca 模型，并按需准备说话人声纹模型…')
-    try { setModels(await api.downloadModels()); setMessage('所需模型已就绪') } catch (error: unknown) { setMessage(error instanceof Error ? error.message : String(error)); setModels(await api.models().catch(() => ({}))) } finally { setBusy(false) }
+    setBusy(true); setMessage('正在下载、校验并加载本地模型；校验通过的现有文件会直接复用…')
+    try { setModels(await api.downloadModels()); setMessage('所需模型已下载、校验并加载') } catch (error: unknown) { setMessage(error instanceof Error ? error.message : String(error)); setModels(await api.models().catch(() => ({}))) } finally { setBusy(false) }
   }
   const chooseDirectory = async (): Promise<void> => {
     if (choosing) return
@@ -85,13 +85,13 @@ export function MeetingSettings(): ReactNode {
   const asrReady = !!(models.asr?.ready && models.vad?.ready)
   const speakerReady = !settings.speakerEnabled || !!models.speaker?.ready
   const allReady = asrReady && speakerReady
-  const modelLabel = allReady ? '模型已就绪' : models.loading || busy ? '正在加载模型' : !models.asr ? '正在读取模型' : models.asr.files?.[0]?.exists === false ? '未找到 Orca 模型' : '模型未就绪'
+  const modelLabel = allReady ? '模型已就绪' : models.loading || busy ? '正在准备模型' : !models.asr ? '正在读取模型' : models.asr.files?.[0]?.exists === false ? '未安装本地模型' : '模型未就绪'
   return <div className="ms-root ms-settings">
     <header className="ms-settings-heading"><h2>语音识别</h2><p>MeetScribe 在本机完成会议转写与说话人区分，按需生成 Word 纪要。默认快捷键 Ctrl+E。</p></header>
     {message && <div className={message.includes('失败') || message.includes('错误') ? 'ms-error' : 'ms-notice'} style={{ margin: '12px 0' }}>{message}</div>}
     <section className="ms-section"><h3>本地识别模型</h3>
-      <div className="ms-row"><span className={`ms-model-state ${allReady ? 'is-ready' : ''}`}>{modelLabel}</span><span className="ms-spacer" /><button className="ms-action ms-primary" disabled={busy} onClick={() => void download()}>{busy ? '正在准备…' : allReady ? '重新检查模型' : '检查并准备模型'}</button></div>
-      <p className="ms-hint">Orca transcribe.cpp 0.4.1 · SenseVoice Small Q8 · Silero VAD v6.2{settings.speakerEnabled ? ' · ERes2NetV2 声纹' : ''}。直接复用 Orca 已下载的 GGUF，不再使用 Zipformer 或 sherpa-onnx 文字识别；模型按音频段识别，默认 800ms 静音后整段定稿。</p>
+      <div className="ms-row"><span className={`ms-model-state ${allReady ? 'is-ready' : ''}`}>{modelLabel}</span><span className="ms-spacer" /><button className="ms-action ms-primary" disabled={busy || models.loading} onClick={() => void download()}>{busy || models.loading ? '正在准备…' : allReady ? '重新检查模型' : '检查并准备模型'}</button></div>
+      <p className="ms-hint">transcribe.cpp 0.4.1 · SenseVoice Small Q8 · Silero VAD v6.2{settings.speakerEnabled ? ' · ERes2NetV2 声纹' : ''}。首次准备时，ASR/VAD 约需下载 254 MB{settings.speakerEnabled ? '，启用声纹后合计约 325 MB' : ''}，文件保存到 %LOCALAPPDATA%\dsh-meetscribe\models；固定地址下载，校验文件大小与 SHA-256 后才加载，已校验文件不会重复下载。SenseVoice 按音频段识别，默认 800ms 静音后整段定稿。</p>
       {models.progress && <><div className="ms-progress"><i style={{ width: `${Math.min(100, models.progress.percent)}%` }} /></div><small className="ms-hint">{models.progress.file} · {Math.floor(models.progress.percent)}%</small></>}
       {models.error && <div className="ms-error" style={{ margin: '10px 0 0' }}>{models.error}</div>}
     </section>
@@ -113,7 +113,7 @@ export function MeetingSettings(): ReactNode {
         <Icon name="folder" /><span>{settings.outputDir}</span><strong>{choosing ? '正在选择…' : '选择文件夹'}</strong>
       </button>
       <p className="ms-hint">逐字稿和说话人声纹只保存在本机。插件不保存录音。只有点击“生成纪要”时，文本才会发送给 DSH 当前选择的大模型；音频不会发送。</p>
-      <Toggle label="启动时预加载模型" description="减少第一次记录的等待时间；DSH 启动后加载 Orca GGUF，并按需准备本地声纹模型。" checked={settings.preloadModels} onChange={(preloadModels) => void save({ preloadModels })} />
+      <Toggle label="启动时预加载模型" description="减少第一次记录的等待时间；DSH 启动后只预加载已经安装的 ASR/VAD，声纹模型按需加载，不会静默下载模型文件。" checked={settings.preloadModels} onChange={(preloadModels) => void save({ preloadModels })} />
     </section>
   </div>
 }

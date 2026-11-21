@@ -1,10 +1,5 @@
-import { join } from 'node:path'
-import { ensureUrlFile } from './download.ts'
+import { LocalModelManager } from './model-manager.ts'
 import { SpeakerClusterer } from '../shared/speaker.ts'
-
-const SPEAKER_MODEL_FILE = '3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx'
-const SPEAKER_MODEL_URL = `https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/${SPEAKER_MODEL_FILE}`
-const SPEAKER_MODEL_SHA256 = 'eda0bf86422a9725a3523d5a1d3d75dedf340664e0ba65cfc1c7b2a78b6cf0b5'
 
 interface SpeakerExtractor {
   createStream(): {
@@ -23,32 +18,50 @@ export interface SpeakerResult {
 export class SpeakerIdentifier {
   private extractor: SpeakerExtractor | null = null
   private loading: Promise<boolean> | null = null
+  private initializationAttempted = false
   private readonly clusters = new Map<string, SpeakerClusterer>()
   lastError = ''
 
   constructor(
-    private readonly modelDirectory: string,
+    private readonly models: LocalModelManager,
     private readonly onProgress: (percent: number) => void,
   ) {}
 
   get modelPath(): string {
-    return join(this.modelDirectory, SPEAKER_MODEL_FILE)
+    return this.models.path('speaker')
   }
 
   async ready(): Promise<boolean> {
     if (this.extractor) return true
-    if (!this.loading) this.loading = this.initialize().finally(() => { this.loading = null })
+    if (this.initializationAttempted) return false
+    return this.initializeOnce(false)
+  }
+
+  async prepare(): Promise<boolean> {
+    return this.initializeOnce(true)
+  }
+
+  private initializeOnce(allowDownload: boolean): Promise<boolean> {
+    this.initializationAttempted = true
+    if (!this.loading) {
+      this.loading = this.initialize(allowDownload)
+        .then(() => { this.lastError = ''; return true })
+        .catch((error: unknown) => {
+          this.lastError = error instanceof Error ? error.message : String(error)
+          return false
+        })
+        .finally(() => { this.loading = null })
+    }
     return this.loading
   }
 
-  private async initialize(): Promise<boolean> {
-    const downloaded = await ensureUrlFile({
-      url: SPEAKER_MODEL_URL,
-      path: this.modelPath,
-      sha256: SPEAKER_MODEL_SHA256,
-      onProgress: this.onProgress,
-    })
-    if (!downloaded) return false
+  private async initialize(allowDownload: boolean): Promise<void> {
+    const prepared = allowDownload
+      ? await this.models.ensure('speaker', this.onProgress)
+      : await this.models.installed('speaker')
+    if (!prepared) throw new Error('声纹模型未安装或校验未通过，请在“识别设置”中点击“检查并准备模型”')
+    if (this.extractor && !prepared.downloaded) return
+    this.extractor = null
     const module = await import('sherpa-onnx-node') as unknown as {
       SpeakerEmbeddingExtractor?: new (config: { model: string; numThreads: number; provider: string; debug: number }) => SpeakerExtractor
       default?: { SpeakerEmbeddingExtractor?: new (config: { model: string; numThreads: number; provider: string; debug: number }) => SpeakerExtractor }
@@ -61,7 +74,6 @@ export class SpeakerIdentifier {
       provider: 'cpu',
       debug: 0,
     })
-    return true
   }
 
   async identify(meetingId: string, samples: Float32Array, threshold: number, maxSpeakers: number): Promise<SpeakerResult | null> {

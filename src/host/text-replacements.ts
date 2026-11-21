@@ -1,7 +1,7 @@
 /**
  * 转写后替换表：把识别器反复听错的词（人名、产品名、英文词）改成想要的写法。
  *
- * Orca 当前下载的 SenseVoice Small GGUF 不提供 vocabulary 或 context_prompt
+ * 当前插件下载的 SenseVoice Small GGUF 不提供 vocabulary 或 context_prompt
  * 能力，因此统一在 transcribe.cpp 的文本出口做明确配置的单次纠正。
  * 临时快照和最终整段识别共用这一套规则，原始模型文本另行保留。
  *

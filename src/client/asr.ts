@@ -3,9 +3,9 @@
  *
  * - The default microphone is resampled to 16 kHz PCM and uploaded incrementally.
  * - Browser RMS segmentation finalizes after the configured silence (800 ms by default).
- * - Orca SenseVoice is non-streaming: the Host refreshes cached segment snapshots for
+ * - Local SenseVoice is non-streaming: the Host refreshes cached segment snapshots for
  *   temporary text, then transcribes the complete segment when final=1 arrives.
- * - Optional vadOnly requests use Orca's Silero GGUF for frame-level speech detection.
+ * - Optional vadOnly requests use the local Silero GGUF for frame-level speech detection.
  * - Epochs and ordered final requests prevent stale audio from crossing segment boundaries.
  */
 
@@ -583,7 +583,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         yieldedSegment = true
         config.onBackchannel?.()
       }
-      // 兼容 Host 主动端点提示；MeetScribe 的 Orca 运行时不发此标记，
+      // 兼容 Host 主动端点提示；MeetScribe 的本地运行时不发此标记，
       // 会议分段由下方浏览器 silenceMs 静音计时决定。
       // I3：hold 按住期间不判端点（松手才发，防思考停顿被拆句）。
       if (out.endpoint && active && speechActive && !holdActive) finalizeSegment()
@@ -813,7 +813,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         const body = useFull ? (sliceChunks(recoverySegment, 0).buffer as ArrayBuffer) : (samples.buffer as ArrayBuffer)
         let res: Response
         try {
-          res = await fetch(asrUrl(true, off, epochSnapshot), { signal: AbortSignal.timeout(25000), // 给 Orca 模型冷启动与整段原生推理预留时间
+          res = await fetch(asrUrl(true, off, epochSnapshot), { signal: AbortSignal.timeout(25000), // 给本地模型冷启动与整段原生推理预留时间
             method: 'POST',
             headers: { 'content-type': 'application/octet-stream' },
             body,
@@ -830,7 +830,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
             setTimeout(async () => {
               try {
                 resolve(
-                  await fetch(asrUrl(true, off, epochSnapshot), { signal: AbortSignal.timeout(25000), // 给 Orca 模型冷启动与整段原生推理预留时间
+                  await fetch(asrUrl(true, off, epochSnapshot), { signal: AbortSignal.timeout(25000), // 给本地模型冷启动与整段原生推理预留时间
                     method: 'POST',
                     headers: { 'content-type': 'application/octet-stream' },
                     body,
@@ -870,7 +870,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
             // I2 修复：re-enter 已 asr.reset 清空 host 流，从 0 全量重发（恢复段引用），
             // 否则 host 只收到尾巴、定稿缺前半句（确定性丢首段）。
             try {
-              res = await fetch(asrUrl(true, 0, epochSnapshot), { signal: AbortSignal.timeout(25000), // 给 Orca 模型冷启动与整段原生推理预留时间
+              res = await fetch(asrUrl(true, 0, epochSnapshot), { signal: AbortSignal.timeout(25000), // 给本地模型冷启动与整段原生推理预留时间
                 method: 'POST',
                 headers: { 'content-type': 'application/octet-stream' },
                 body: sliceChunks(recoverySegment, 0).buffer as ArrayBuffer,
@@ -905,7 +905,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         // P1-5+：定稿就绪边界（final-ready）。
         //
         // 「submitted」= 定稿**上传发起**；「final-ready」= 定稿**文本可用**。两者之间
-        // 是 Orca 完整音频段的本地原生推理耗时。保留独立边界，便于区分网络上传、
+        // 是本地完整音频段的原生推理耗时。保留独立边界，便于区分网络上传、
         // 模型计算和随后的 LLM 首 token，不把不同阶段的延迟混在一起。
         //
         // 轮次守卫：新一轮「说完」已发生（telemetryRound 前进）→ 丢弃本轮迟到事件，
@@ -984,7 +984,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     // 批 7O：detect 经探测落 manual 时同样丢弃非按压帧（runtimeBargeInMode 已解析）。
     if (runtimeBargeInMode === 'manual' && !holdActive) return
     // 跨平台守卫：Safari 等浏览器会忽略 AudioContext({sampleRate}) 选项，
-    // 实际按 44.1k/48k 输出。非 16k 时先线性重采样，保证 Orca SenseVoice
+    // 实际按 44.1k/48k 输出。非 16k 时先线性重采样，保证本地 SenseVoice
     // 始终收到 16k PCM（避免识别错乱）。
     let data = ctxRate !== SAMPLE_RATE ? resampleLinear(raw, ctxRate, SAMPLE_RATE) : raw
     // fixture 录制（ADR-0004，默认关闭）：留住 AEC 前的 mic 与参考窗，供离线重放。

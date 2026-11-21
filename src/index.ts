@@ -3,7 +3,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createReadStream } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import { createAsrRuntime, pcmToSamples } from './host/orca-asr-runtime.ts'
+import { createAsrRuntime, pcmToSamples } from './host/local-asr-runtime.ts'
+import { LOCAL_MODEL_CATALOG, LocalModelManager, type LocalModelKind } from './host/model-manager.ts'
 import { MeetingStore } from './host/meeting-store.ts'
 import { SettingsStore } from './host/settings.ts'
 import { SpeakerIdentifier } from './host/speaker-identifier.ts'
@@ -25,7 +26,9 @@ export { normalizeAsrReplacements, parseAsrReplacements, formatAsrReplacements }
 export { collectMinutesDocuments, queryMinutesDocuments } from './shared/documents.ts'
 export { completeWithDefaultModel } from './host/llm.ts'
 export { buildTranscriptForMinutes } from './host/minutes-service.ts'
-export { createAsrRuntime, pcmToSamples, resolveOrcaModelPaths } from './host/orca-asr-runtime.ts'
+export { createAsrRuntime, pcmToSamples } from './host/local-asr-runtime.ts'
+export { LOCAL_MODEL_CATALOG, LocalModelManager, localModelPath, resolveLocalModelPaths } from './host/model-manager.ts'
+export { ensureUrlFile, fileSha256 } from './host/download.ts'
 export const inject = ['webServer']
 
 const BASE_PATH = '/meetscribe'
@@ -86,8 +89,10 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
   const settings = new SettingsStore(join(dataRoot, 'settings.json'))
   const store = new MeetingStore(join(dataRoot, 'meetings'))
   const modelRoot = join(dataRoot, 'models')
+  const modelManager = new LocalModelManager(modelRoot)
   const clients = new Set<ServerResponse>()
   let activeMeetingId: string | null = null
+  let preparingModels: Promise<void> | null = null
   let lastProgress: ModelProgress | null = null
   let lastModelError = ''
   const audio = new Map<string, Map<number, Float32Array[]>>()
@@ -102,6 +107,7 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
   let replacementRules = settings.get().asrReplacements
   let replaceAsrText = createAsrReplacer(replacementRules)
   const asr = createAsrRuntime({
+    modelPaths: modelManager.speechPaths,
     senseITN: () => settings.get().senseITN,
     replaceText: (text) => {
       const rules = settings.get().asrReplacements
@@ -119,13 +125,13 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       }
       if (event === 'asr-error') {
         const detail = payload as { message?: unknown }
-        lastModelError = typeof detail?.message === 'string' ? detail.message : 'Orca 模型加载失败，请检查本机模型后重试'
+        lastModelError = typeof detail?.message === 'string' ? detail.message : '本地模型加载失败，请检查模型文件后重试'
       }
       send(event, payload)
     },
   })
-  const speakerIdentifier = new SpeakerIdentifier(join(modelRoot, 'speaker'), (percent) => {
-    lastProgress = { file: 'speaker-model.onnx', percent }
+  const speakerIdentifier = new SpeakerIdentifier(modelManager, (percent) => {
+    lastProgress = { file: LOCAL_MODEL_CATALOG.speaker.fileName, percent }
     send('asr-progress', lastProgress)
   })
 
@@ -153,21 +159,38 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       ...status,
       speaker,
       loading: status.loading || lastProgress !== null || speaker.loading,
-      error: lastModelError || status.error || undefined,
+      error: lastModelError || status.error || speaker.error || undefined,
     }
   }
 
   async function downloadModels(): Promise<void> {
-    lastModelError = ''
-    const asrReady = await asr.retryModel('asr')
-    if (!asrReady) throw new Error(lastModelError || asr.modelStatus().error || 'Orca 识别模型不可用')
-    const vadReady = await asr.retryModel('vad')
-    if (!vadReady) throw new Error(lastModelError || asr.modelStatus().error || 'Orca VAD 模型不可用')
-    if (settings.get().speakerEnabled) {
-      const ok = await speakerIdentifier.ready()
-      if (!ok) throw new Error('说话人模型下载或校验失败')
-    }
-    send('models', modelStatus())
+    if (activeMeetingId) throw new Error('请先暂停记录，再检查并准备模型')
+    if (preparingModels) return preparingModels
+    preparingModels = (async () => {
+      lastModelError = ''
+      const reportProgress = (kind: LocalModelKind) => (percent: number): void => {
+        lastProgress = { file: LOCAL_MODEL_CATALOG[kind].fileName, percent }
+        send('asr-progress', lastProgress)
+      }
+      const asrPrepared = await modelManager.ensure('asr', reportProgress('asr'))
+      const asrReady = await asr.retryModel('asr', asrPrepared.downloaded)
+      if (!asrReady) throw new Error(lastModelError || asr.modelStatus().error || '本地识别模型不可用')
+      const vadPrepared = await modelManager.ensure('vad', reportProgress('vad'))
+      const vadReady = await asr.retryModel('vad', vadPrepared.downloaded)
+      if (!vadReady) throw new Error(lastModelError || asr.modelStatus().error || '本地 VAD 模型不可用')
+      if (settings.get().speakerEnabled) {
+        const ok = await speakerIdentifier.prepare()
+        if (!ok) throw new Error(speakerIdentifier.status().error || '说话人模型下载、校验或加载失败')
+      }
+    })().catch((error: unknown) => {
+      lastModelError = error instanceof Error ? error.message : String(error)
+      throw error
+    }).finally(() => {
+      lastProgress = null
+      preparingModels = null
+      send('models', modelStatus())
+    })
+    return preparingModels
   }
 
   function clearAudio(meetingId: string, epoch?: number): void {
@@ -419,6 +442,10 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       return
     }
     if (action === 'start' && req.method === 'POST') {
+      if (preparingModels) {
+        respondJson(res, 409, { error: '正在准备模型，请完成后再开始记录' })
+        return
+      }
       activeMeetingId = meetingId
       asr.reset(meetingId)
       clearAudio(meetingId)
@@ -437,6 +464,10 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       return
     }
     if (action === 'resume' && req.method === 'POST') {
+      if (preparingModels) {
+        respondJson(res, 409, { error: '正在准备模型，请完成后再继续记录' })
+        return
+      }
       activeMeetingId = meetingId
       const updated = await store.update(meetingId, { status: 'recording' })
       respondJson(res, 200, publicMeeting(updated))

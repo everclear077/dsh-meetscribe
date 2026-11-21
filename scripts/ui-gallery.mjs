@@ -137,7 +137,7 @@ async function checkWorkspaceSettings(theme) {
   if (modelStateLayout.text !== '模型已就绪' || modelStateLayout.height > 30 || modelStateLayout.width < 60) {
     throw new Error(`Model readiness label layout is broken: ${JSON.stringify(modelStateLayout)}`)
   }
-  if (!await page.getByText('transcribe.cpp 0.4.1', { exact: false }).count()) throw new Error('Orca model description is stale.')
+  if (!await page.getByText('transcribe.cpp 0.4.1', { exact: false }).count()) throw new Error('Local model description is stale.')
   if (!await page.getByText('ERes2NetV2 声纹', { exact: false }).count()) throw new Error('Speaker model description is stale.')
   const silenceInput = page.locator('input[type="number"]')
   if (await silenceInput.inputValue() !== '800') throw new Error('Default silence is not 800 ms.')

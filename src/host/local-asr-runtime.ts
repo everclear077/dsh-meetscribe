@@ -1,23 +1,22 @@
 /**
- * Orca transcribe.cpp ASR runtime.
+ * Local transcribe.cpp ASR runtime with plugin-managed model files.
  *
  * SenseVoiceSmall-Q8_0.gguf is non-streaming. During a browser-delimited segment
  * we refresh a cached temporary result from immutable PCM snapshots; final=1
- * transcribes the complete segment. There is no Zipformer or sherpa-onnx ASR
- * fallback. Browser RMS segmentation remains the meeting endpoint mechanism;
- * Orca's Silero GGUF serves the optional frame-level detect() channel.
+ * transcribes the complete segment. Browser RMS segmentation remains the meeting
+ * endpoint mechanism; Silero GGUF serves the optional frame-level detect() channel.
  */
 import { statSync } from 'node:fs'
-import { join } from 'node:path'
 import {
   TranscribeModel,
   type TranscriptionResult,
   type VadResult,
 } from 'transcribe-cpp'
+import { LOCAL_MODEL_CATALOG, type LocalModelPaths } from './model-manager.ts'
 
-export const ORCA_ASR_MODEL = 'SenseVoiceSmall-Q8_0.gguf'
-export const ORCA_VAD_MODEL = 'silero-vad-v6.2-F32.gguf'
-export const ORCA_ENGINE = 'orca/transcribe.cpp-0.4.1'
+export const LOCAL_ASR_MODEL = LOCAL_MODEL_CATALOG.asr.fileName
+export const LOCAL_VAD_MODEL = LOCAL_MODEL_CATALOG.vad.fileName
+export const LOCAL_ENGINE = 'transcribe.cpp-0.4.1'
 
 const SAMPLE_RATE = 16000
 const MAX_MODEL_SAMPLES = SAMPLE_RATE * 30
@@ -25,19 +24,6 @@ const PARTIAL_MIN_SAMPLES = SAMPLE_RATE * 0.4
 const PARTIAL_INTERVAL_MS = 900
 const PARTIAL_MIN_NEW_SAMPLES = SAMPLE_RATE * 0.3
 const SEGMENT_IDLE_MS = 90000
-
-export interface OrcaModelPaths {
-  asr: string
-  vad: string
-}
-
-export function resolveOrcaModelPaths(appData = process.env.APPDATA): OrcaModelPaths {
-  const root = appData ? join(appData, 'orca', 'speech-models') : ''
-  return {
-    asr: root ? join(root, 'sense-voice-zh-en-ja-ko-yue', ORCA_ASR_MODEL) : '',
-    vad: root ? join(root, 'silero-vad-v6.2', ORCA_VAD_MODEL) : '',
-  }
-}
 
 function fileSize(path: string): number {
   if (!path) return 0
@@ -53,11 +39,11 @@ export interface AsrRuntimeOptions {
   senseITN: () => boolean
   broadcast: (event: string, payload: unknown) => void
   replaceText?: (text: string) => string
-  /** Explicit paths are intended for integration tests; normal use discovers Orca. */
-  modelPaths?: OrcaModelPaths
+  /** Plugin-managed paths; explicit values also keep integration tests isolated. */
+  modelPaths: LocalModelPaths
 }
 
-export interface OrcaAsrModel {
+export interface LocalAsrModel {
   readonly roles: readonly string[]
   readonly capabilities: { nativeSampleRate: number; maxAudioMs: number; supportsStreaming: boolean }
   readonly arch: string
@@ -66,20 +52,20 @@ export interface OrcaAsrModel {
   dispose(): void
 }
 
-export interface OrcaVadSession {
+export interface LocalVadSession {
   streamFeed(pcm: Float32Array): Promise<VadResult>
   streamReset(): Promise<void>
   dispose(): void
 }
 
-export interface OrcaVadModel {
-  createVadSession(): OrcaVadSession
+export interface LocalVadModel {
+  createVadSession(): LocalVadSession
   dispose(): void
 }
 
-export interface OrcaRuntimeDependencies {
-  loadAsrModel?: (path: string) => Promise<OrcaAsrModel>
-  loadVadModel?: (path: string) => Promise<OrcaVadModel>
+export interface LocalRuntimeDependencies {
+  loadAsrModel?: (path: string) => Promise<LocalAsrModel>
+  loadVadModel?: (path: string) => Promise<LocalVadModel>
   now?: () => number
 }
 
@@ -96,7 +82,7 @@ export interface AsrRuntime {
   reset(sessionId: string): void
   dispose(): void
   modelStatus(): ModelsStatus
-  retryModel(kind: 'asr' | 'vad'): Promise<boolean>
+  retryModel(kind: 'asr' | 'vad', reload?: boolean): Promise<boolean>
   warmup(): void
   markStale(): void
 }
@@ -142,14 +128,14 @@ interface SegmentState {
 }
 
 function missingModelMessage(path: string): string {
-  return `未找到 Orca 识别模型：${path || '%APPDATA%\\orca\\speech-models'}。请先在 Orca 中下载 SenseVoice Small，再点击“检查模型”。`
+  return `未找到本地识别模型：${path}。请打开左侧 MeetScribe 的“识别设置”，点击“检查并准备模型”。`
 }
 
 export function createAsrRuntime(
   options: AsrRuntimeOptions,
-  dependencies: OrcaRuntimeDependencies = {},
+  dependencies: LocalRuntimeDependencies = {},
 ): AsrRuntime {
-  const paths = options.modelPaths ?? resolveOrcaModelPaths()
+  const paths = options.modelPaths
   const now = dependencies.now ?? Date.now
   const loadAsr = dependencies.loadAsrModel ?? ((path: string) => TranscribeModel.load(path, { backend: 'cpu' }))
   const loadVad = dependencies.loadVadModel ?? ((path: string) => TranscribeModel.load(path, { backend: 'cpu' }))
@@ -157,11 +143,11 @@ export function createAsrRuntime(
   const finalized = new Map<string, Map<number, string>>()
   const finalizing = new Map<string, Map<number, Promise<string>>>()
   const resetGenerations = new Map<string, number>()
-  const detectSessions = new Map<string, { session: OrcaVadSession; lastUse: number }>()
-  let asrModel: OrcaAsrModel | null = null
-  let vadModel: OrcaVadModel | null = null
-  let asrLoading: Promise<OrcaAsrModel | null> | null = null
-  let vadLoading: Promise<OrcaVadModel | null> | null = null
+  const detectSessions = new Map<string, { session: LocalVadSession; lastUse: number }>()
+  let asrModel: LocalAsrModel | null = null
+  let vadModel: LocalVadModel | null = null
+  let asrLoading: Promise<LocalAsrModel | null> | null = null
+  let vadLoading: Promise<LocalVadModel | null> | null = null
   let asrError = fileSize(paths.asr) > 0 ? '' : missingModelMessage(paths.asr)
   let vadError = ''
   let disposed = false
@@ -175,7 +161,7 @@ export function createAsrRuntime(
     options.broadcast('asr-error', { kind, message })
   }
 
-  const ensureAsrModel = async (): Promise<OrcaAsrModel | null> => {
+  const ensureAsrModel = async (): Promise<LocalAsrModel | null> => {
     if (asrModel) return asrModel
     if (disposed) return null
     if (!paths.asr || fileSize(paths.asr) === 0) {
@@ -185,16 +171,16 @@ export function createAsrRuntime(
     if (!asrLoading) {
       asrLoading = loadAsr(paths.asr)
         .then((loaded) => {
-          if (!loaded.roles.includes('asr')) throw new Error('Orca 模型不包含 ASR 能力')
-          if (loaded.capabilities.nativeSampleRate !== SAMPLE_RATE) throw new Error('Orca 模型采样率不是 16 kHz')
-          if (loaded.capabilities.maxAudioMs < 12000) throw new Error('Orca 模型不支持当前 12 秒会议分段')
+          if (!loaded.roles.includes('asr')) throw new Error('本地模型不包含 ASR 能力')
+          if (loaded.capabilities.nativeSampleRate !== SAMPLE_RATE) throw new Error('本地模型采样率不是 16 kHz')
+          if (loaded.capabilities.maxAudioMs < 12000) throw new Error('本地模型不支持当前 12 秒会议分段')
           if (disposed) {
             loaded.dispose()
             return null
           }
           asrModel = loaded
           asrError = ''
-          options.broadcast('asr-ready', { kind: 'asr', engine: ORCA_ENGINE, model: ORCA_ASR_MODEL })
+          options.broadcast('asr-ready', { kind: 'asr', engine: LOCAL_ENGINE, model: LOCAL_ASR_MODEL })
           return loaded
         })
         .catch((error: unknown) => {
@@ -208,7 +194,7 @@ export function createAsrRuntime(
     return asrLoading
   }
 
-  const ensureVadModel = async (): Promise<OrcaVadModel | null> => {
+  const ensureVadModel = async (): Promise<LocalVadModel | null> => {
     if (vadModel) return vadModel
     if (disposed || !paths.vad || fileSize(paths.vad) === 0) return null
     if (!vadLoading) {
@@ -220,7 +206,7 @@ export function createAsrRuntime(
           }
           vadModel = loaded
           vadError = ''
-          options.broadcast('asr-ready', { kind: 'vad', engine: ORCA_ENGINE, model: ORCA_VAD_MODEL })
+          options.broadcast('asr-ready', { kind: 'vad', engine: LOCAL_ENGINE, model: LOCAL_VAD_MODEL })
           return loaded
         })
         .catch((error: unknown) => {
@@ -255,7 +241,7 @@ export function createAsrRuntime(
     return pcm
   }
 
-  const transcribe = async (model: OrcaAsrModel, pcm: Float32Array): Promise<string> => {
+  const transcribe = async (model: LocalAsrModel, pcm: Float32Array): Promise<string> => {
     if (pcm.length === 0) return ''
     const result = await enqueueAsr(() => model.transcribe(pcm, {
       timestamps: 'none',
@@ -263,7 +249,7 @@ export function createAsrRuntime(
     }))
     if (asrError) {
       asrError = ''
-      options.broadcast('asr-ready', { kind: 'asr', engine: ORCA_ENGINE, model: ORCA_ASR_MODEL, recovered: true })
+      options.broadcast('asr-ready', { kind: 'asr', engine: LOCAL_ENGINE, model: LOCAL_ASR_MODEL, recovered: true })
     }
     return result.text.trim()
   }
@@ -310,7 +296,7 @@ export function createAsrRuntime(
     const end = offset + samples.length
     if (end <= segment.fed) return
     const increment = samples.subarray(Math.max(0, segment.fed - offset))
-    if (segment.fed + increment.length > MAX_MODEL_SAMPLES) throw new Error('Orca SenseVoice 单段音频不能超过 30 秒')
+    if (segment.fed + increment.length > MAX_MODEL_SAMPLES) throw new Error('SenseVoice 单段音频不能超过 30 秒')
     segment.chunks.push(increment.slice())
     segment.fed += increment.length
     segment.lastActivity = now()
@@ -360,7 +346,7 @@ export function createAsrRuntime(
         return { text: '', loading: true }
       }
       const model = await ensureAsrModel()
-      if (!model) throw new Error(asrError || 'Orca 识别模型加载失败，请检查模型文件后重试')
+      if (!model) throw new Error(asrError || '本地识别模型加载失败，请检查模型文件后重试')
       if (segments.get(sessionId)?.get(epoch) !== segment) return { text: '' }
       maybeStartPartial(sessionId, epoch, segment)
       return { text: segment.text }
@@ -371,7 +357,7 @@ export function createAsrRuntime(
     const generation = segment.generation
     const promise = (async (): Promise<string> => {
       const model = await ensureAsrModel()
-      if (!model) throw new Error(asrError || 'Orca 识别模型加载失败，请检查模型文件后重试')
+      if (!model) throw new Error(asrError || '本地识别模型加载失败，请检查模型文件后重试')
       if ((resetGenerations.get(sessionId) ?? 0) !== generation) return ''
       if (segment.pending?.samples === segment.fed) return segment.pending.promise
       return transcribe(model, snapshot(segment))
@@ -493,17 +479,17 @@ export function createAsrRuntime(
       const vadSize = fileSize(paths.vad)
       return {
         asr: {
-          repo: ORCA_ENGINE,
+          repo: LOCAL_ENGINE,
           ready: asrModel !== null,
           loaded: asrModel !== null,
-          files: [{ name: ORCA_ASR_MODEL, exists: asrSize > 0, size: asrSize }],
+          files: [{ name: LOCAL_ASR_MODEL, exists: asrSize > 0, size: asrSize }],
           arch: asrModel?.arch,
           variant: asrModel?.variant,
           streaming: false,
           error: asrError || undefined,
         },
         vad: {
-          repo: ORCA_ENGINE,
+          repo: LOCAL_ENGINE,
           ready: vadModel !== null,
           loaded: vadModel !== null,
           size: vadSize,
@@ -514,17 +500,32 @@ export function createAsrRuntime(
         progress: null,
       }
     },
-    retryModel: async (kind) => {
+    retryModel: async (kind, reload = false) => {
       if (kind === 'asr') {
+        if (reload) {
+          if (asrLoading) await asrLoading
+          const previous = asrModel
+          asrModel = null
+          await asrQueue
+          previous?.dispose()
+        }
         asrError = ''
         const loaded = await ensureAsrModel()
         if (!loaded && asrError) options.broadcast('asr-error', { kind, message: asrError })
         return loaded !== null
       }
+      if (reload) {
+        if (vadLoading) await vadLoading
+        for (const sessionId of [...detectSessions.keys()]) resetDetect(sessionId)
+        const previous = vadModel
+        vadModel = null
+        await vadQueue
+        previous?.dispose()
+      }
       vadError = ''
       const loaded = await ensureVadModel()
       if (!loaded) {
-        vadError = `未找到或无法加载 Orca VAD 模型：${paths.vad || ORCA_VAD_MODEL}`
+        vadError = `未找到或无法加载本地 VAD 模型：${paths.vad || LOCAL_VAD_MODEL}`
         options.broadcast('asr-error', { kind, message: vadError })
       }
       return loaded !== null

@@ -1,6 +1,6 @@
 # dsh-meetscribe 技术架构
 
-更新日期：2026-11-21
+更新日期：2026-11-22
 状态：v0.1 实际实现说明
 
 ## 1. 进程与数据流
@@ -20,7 +20,7 @@ Harness Browser Client                             │
        │ 本地 HTTP：PCM、控制、元数据                ▼
        ▼                                    Harness Cordis Host
        └────────────────────────────────────────────▶ /meetscribe
-                                                    ├─ Orca transcribe.cpp 0.4.1
+                                                    ├─ transcribe.cpp 0.4.1
                                                     │  ├─ SenseVoice Small Q8 GGUF
                                                     │  └─ Silero VAD v6.2 GGUF
                                                     ├─ ERes2NetV2 embedding + 聚类
@@ -59,7 +59,7 @@ Harness Browser Client                             │
 - AudioWorklet 优先，ScriptProcessor 作为兼容兜底；真实采集电平节流后驱动浮窗声波。
 - 重采样到 16 kHz Float32 PCM，以 `sessionId + epoch + offset + final` 上传。
 - 浏览器 RMS 检测语音；默认连续静音 800ms 定稿，连续讲话最长约 12 秒自动分段。
-- partial 请求约每 100ms 增量上传，但 Orca 模型本身不是流式模型；Host 按有界间隔刷新临时快照，不是在浏览器中运行流式解码。
+- partial 请求约每 100ms 增量上传，但 模型本身不是流式模型；Host 按有界间隔刷新临时快照，不是在浏览器中运行流式解码。
 - 当前 UI 不提供系统/混合采集入口。底层 `getDisplayMedia` 路径在 Harness 0.2.2-rc.5 实测拒绝该权限，成功路径尚未验证。
 - 自定义 MediaStream 的 track、AudioContext 和监听器在暂停、停止或异常时释放；关闭和最小化浮窗不会释放采集。
 
@@ -88,31 +88,31 @@ POST /meetings/:id/generate
 GET  /meetings/:id/documents/:version
 ```
 
-`/models/download` 保留现有路由名以兼容客户端，但实际行为是检查并加载 Orca 已下载的 ASR/VAD GGUF，再按需下载和校验声纹模型；不会下载 Zipformer 或 sherpa-onnx SenseVoice。
+`/models/download` 由 `LocalModelManager` 依次准备 ASR、VAD，并在启用说话人时准备声纹模型。每类文件按固定地址、大小和 SHA-256 下载或复用，完成后立即调用原生运行时加载；同一模型的并发准备任务共享 Promise。ASR/VAD 主地址连接失败会尝试内置备用镜像，完整性约束不变。启动预加载不触发下载；录音中的声纹懒加载只检查并加载已安装的有效文件，不会隐式下载。活动录音期间禁止安装或修复模型，模型准备期间 start/resume 返回 409，避免两条流程竞争。
 
 安全规则：loopback-only、写操作同源检查、请求体大小限制、Word 下载路径来自已登记文件，不接收任意文件路径。
 
-## 4. Orca ASR、VAD 与说话人
+## 4. 本地模型、ASR、VAD 与说话人
 
-### 4.1 模型发现与加载
+### 4.1 下载、校验与加载
 
-`src/host/orca-asr-runtime.ts` 直接复用本机 Orca 的模型目录：
+`src/host/model-manager.ts` 集中声明三类模型的固定地址、文件大小和 SHA-256，并统一保存到 `%LOCALAPPDATA%\dsh-meetscribe\models`：
 
-| 用途 | 引擎与模型 | 默认位置（`%APPDATA%` 下） |
+| 用途 | 引擎与模型 | 插件模型目录 |
 | --- | --- | --- |
-| 文字识别 | transcribe.cpp 0.4.1 / `SenseVoiceSmall-Q8_0.gguf` | `orca/speech-models/sense-voice-zh-en-ja-ko-yue/` |
-| 帧级语音检测 | transcribe.cpp 0.4.1 / `silero-vad-v6.2-F32.gguf` | `orca/speech-models/silero-vad-v6.2/` |
-| 声纹 | `sherpa-onnx-node` / ERes2NetV2 ONNX | `%LOCALAPPDATA%/dsh-meetscribe/models/speaker/` |
+| 文字识别 | transcribe.cpp 0.4.1 / `SenseVoiceSmall-Q8_0.gguf` | `asr/` |
+| 帧级语音检测 | transcribe.cpp 0.4.1 / `silero-vad-v6.2-F32.gguf` | `vad/` |
+| 声纹 | `sherpa-onnx-node` / ERes2NetV2 ONNX | `speaker/` |
 
-本机 Orca 1.4.268 中实际存在上述两个 GGUF；未把 Orca 支持但未下载的 Whisper 或 Parakeet 当作当前模型。transcribe.cpp 要求 Node 22+；Harness Host 和构建环境均满足。Host 以 `backend: 'cpu'` 加载，使用 npm `transcribe-cpp@0.4.1` 及对应原生包，不启动 Orca 进程，也不把音频发给 Orca 服务。
+`LocalModelManager.ensure()` 先检查现有文件的精确大小和 SHA-256，匹配则直接复用。缺失或不匹配时从固定 HTTPS 地址下载；ASR/VAD 主地址连接失败会尝试内置备用镜像，摘要保持一致。初始 URL 和每次重定向都执行主机允许列表检查。每个文件写入唯一 `.part` 路径，验证通过后才替换正式文件，失败会清理临时文件并保留旧文件。同一模型的并发准备共享同一个 Promise。准备路由会把是否实际替换文件传给运行时：ASR 等待在途推理后重建实例，VAD 清理旧会话后重建实例，声纹在实际替换后重建 extractor；单纯缓存命中不重复加载。
 
-SenseVoice Small Q8 的能力经真实加载确认：16 kHz，中文/粤语/英文/日文/韩文，支持 ITN，最大音频 30 秒，不支持原生流式、vocabulary 或 context prompt。当前 12 秒浏览器分段低于模型上限；Host 另设 30 秒防御上限。
+`src/host/local-asr-runtime.ts` 只接收上述插件模型路径，不再探测外部应用目录。transcribe.cpp 要求 Node 22+；Host 以 `backend: 'cpu'` 加载 ASR/VAD。SenseVoice Small Q8 为 16 kHz，支持中文、粤语、英文、日文、韩文和 ITN，最大音频 30 秒，不支持原生流式、vocabulary 或 context prompt。当前 12 秒浏览器分段低于模型上限，Host 另设 30 秒防御上限。
 
-ASR 不再包含 Streaming Zipformer，也不包含 sherpa-onnx SenseVoice worker 或任何 sherpa ASR 降级路径。`sherpa-onnx-node` 仅保留给 ERes2NetV2 声纹嵌入；它不是文字识别引擎。
+ASR 不包含 Streaming Zipformer、sherpa-onnx SenseVoice worker 或云端 ASR 降级路径。`sherpa-onnx-node` 仅保留给 ERes2NetV2 声纹嵌入。
 
 ### 4.2 非流式模型的临时结果与定稿
 
-Orca SenseVoice 的调用单位是完整 PCM 段：
+SenseVoice 的调用单位是完整 PCM 段：
 
 1. Host 按 `sessionId + epoch` 累积增量 PCM，并按 `offset` 去重；缺口直接报错。
 2. 模型加载后，段长至少 0.4 秒、距上次快照至少 900ms 且有足够新音频时，启动一次后台快照识别。
@@ -127,7 +127,7 @@ Orca SenseVoice 的调用单位是完整 PCM 段：
 
 ### 4.3 VAD
 
-会议断句由浏览器 RMS 和 800ms 静音设置决定。Orca Silero VAD GGUF 用于 `detect()` / `vadOnly=1` 帧级语音检测通道；VAD session 独立串行，reset 时清理。它不是 Zipformer 的附属组件，也不再负责两个 ASR 引擎之间的切换。
+会议断句由浏览器 RMS 和 800ms 静音设置决定。Silero VAD GGUF 用于 `detect()` / `vadOnly=1` 帧级语音检测通道；VAD session 独立串行，reset 时清理。它不是 Zipformer 的附属组件，也不再负责两个 ASR 引擎之间的切换。
 
 ### 4.4 声纹聚类
 
@@ -135,7 +135,7 @@ Orca SenseVoice 的调用单位是完整 PCM 段：
 
 Electron 环境禁止 native external ArrayBuffer，因此调用 `extractor.compute(stream, false)`，让 N-API 返回 JavaScript 拥有的副本。公开 HTTP 会议响应会移除 embedding；本地 JSON 保留它供聚类使用。
 
-当前是在线匿名聚类，不是注册身份识别，也没有离线全局重分段。重叠语音可能产生误分。Orca 当前没有已下载的说话人分离模型，因此没有把文字模型更换误称为声纹模型更换。
+当前是在线匿名聚类，不是注册身份识别，也没有离线全局重分段。重叠语音可能产生误分；文字识别模型与声纹模型是两条独立链路，不能把其中一种模型的能力误称为另一种。
 
 模型选择使用 `scripts/evaluate-speaker-models.mjs` 对 sherpa-onnx release 的公开说话人音频做同条件对照。ERes2NetV2 相比此前 CAM++ 的完整句同人平均相似度为 0.8333 / 0.8046，最短同人与最高异人分数间隔为 0.3978 / 0.3208；0.8 秒窗口的同人平均相似度为 0.6349 / 0.5628。样本规模较小且不是真人会议室，结果只支持本次模型选择，不构成泛化准确率承诺。
 
@@ -145,7 +145,7 @@ Electron 环境禁止 native external ArrayBuffer，因此调用 `extractor.comp
 
 `src/shared/vocabulary.ts` 负责全局规则的解析、长度/数量限制和持久化规范化；`src/host/text-replacements.ts` 编译大小写不敏感、最长优先、英文整词边界、中英空白容忍的单次替换器。
 
-当前 Orca SenseVoice GGUF 不支持 vocabulary 或 context prompt，因此保留确定性文本纠正，而不是宣称模型能够原生接收热词。Host 在 ASR 共同文本出口套用规则，覆盖临时结果和最终整段识别；替换器按设置数组身份缓存。原始模型文本和纠正后的展示文本分别写入会议 JSON，生成纪要使用展示文本。
+当前 SenseVoice GGUF 不支持 vocabulary 或 context prompt，因此保留确定性文本纠正，而不是宣称模型能够原生接收热词。Host 在 ASR 共同文本出口套用规则，覆盖临时结果和最终整段识别；替换器按设置数组身份缓存。原始模型文本和纠正后的展示文本分别写入会议 JSON，生成纪要使用展示文本。
 
 ## 5. 持久化
 
@@ -214,11 +214,13 @@ npm run sample:word
 npm run sample:ui
 ```
 
-真实 Orca 模型与 Host 链路复测（使用自行准备的 16 kHz 单声道 PCM16 WAV）：
+真实模型下载与加载复测，以及 Host 链路复测（音频使用自行准备的 16 kHz 单声道 PCM16 WAV）：
 
 ```powershell
-node scripts/smoke-orca-asr.mjs <sample.wav> [...more.wav]
-node scripts/smoke-harness-orca.mjs http://127.0.0.1:<host-port> <sample.wav>
+npm run build
+node scripts/verify-model-downloads.mjs <model-directory>
+node scripts/smoke-local-asr.mjs <sample.wav> [...more.wav]
+node scripts/smoke-harness-asr.mjs http://127.0.0.1:<host-port> <sample.wav>
 ```
 
 后者创建一个明确标记的合成测试会议，验证 partial、final、持久化和公开响应不泄露 embedding，最后只删除该测试会议。真实桌面验证和限制见根目录 `TESTING.md`。
