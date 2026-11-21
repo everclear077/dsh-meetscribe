@@ -1,20 +1,12 @@
 /**
- * dsh-voice-mode ASR engine（浏览器半）：持续聆听 + VAD 自动分段。
+ * Browser audio capture and meeting segmentation.
  *
- * 与参照 dsh-voice 的关键差异：
- *  - 不是 tap/hold，而是「进入语音模式后持续收音」：静音 1500ms 自动断句（P1-3，端点优先由 host Silero VAD 判定），
- *    段定稿后提交；按住 Ctrl（≥250ms 语音）强制立即发送兜底；
- *  - partial 轮询（100ms，P1-4 增量上行）走 host 流式识别增量，实时字幕只在状态条预览，
- *    定稿文本才作为结果（Q6/Q13：可编辑草稿 + 自动提交）；服务端 Silero VAD 帧级
- *    isSpeech 随 partial / 播放期 vadOnly 检测响应下行，驱动打断（阶段二，取代 RMS
- *    能量快路径；朗读期常规 partial 因自聊防护断流，检测通道补齐这条链路）；
- *  - v0.2：hold 模式（按住说话、松手发送，绕过 VAD）；
- *  - v0.3（P1-5）：延迟埋点链的客户端时间戳——utterance-end（说完最后一个字）、
- *    endpoint-fired（端点判句到点）、submitted（定稿上传发起）、final-ready（定稿文本
- *    可用，2026-11-03 补：此前 submitted→first-llm-token 把宿主定稿与 LLM 首 token
- *    并在一段，无法定位慢在哪一层），经 onTelemetry 上抛，
- *    由 client.tsx 与 host 下行的 first-llm-token/first-sentence-text/first-tts-chunk/
- *    first-audio-played 拼接成「说完→首音」全链路（开发模式状态条展示）。
+ * - The default microphone is resampled to 16 kHz PCM and uploaded incrementally.
+ * - Browser RMS segmentation finalizes after the configured silence (800 ms by default).
+ * - Orca SenseVoice is non-streaming: the Host refreshes cached segment snapshots for
+ *   temporary text, then transcribes the complete segment when final=1 arrives.
+ * - Optional vadOnly requests use Orca's Silero GGUF for frame-level speech detection.
+ * - Epochs and ordered final requests prevent stale audio from crossing segment boundaries.
  */
 
 import { resampleLinear } from './resample.ts'
@@ -91,7 +83,7 @@ export interface AsrConfig {
   acquireAudio?: () => Promise<MediaStream>
   /** Release resources associated with a custom stream (for example its mixer). */
   releaseAudio?: (stream: MediaStream) => void | Promise<void>
-  /** 静音多少 ms 判句结束（Q5，默认 1500；端点优先由 host Silero VAD 判定）。 */
+  /** 静音多少 ms 判句结束（默认 800，由浏览器 RMS 分段）。 */
   silenceMs: number
   /** host 路由前缀。 */
   basePath: string
@@ -180,7 +172,8 @@ const SAMPLE_RATE = 16000
 const SPEECH_RMS = 0.015
 /** RMS 映射满格波形的电平。 */
 const LEVEL_CEILING = 0.25
-const MAX_SEGMENT_MS = 30000
+/** 连续语音最长分段：避免多人连续发言混在同一声纹段，同时给完整句子保留上下文。 */
+const MAX_SEGMENT_MS = 12000
 /** 最小语音时长（P1-3）：不足视为短促噪声，静音到点后放弃本段不发送。 */
 const MIN_SPEECH_MS = 250
 const PRE_PAD_MS = 250
@@ -190,7 +183,7 @@ const PRE_PAD_MS = 250
 const PRE_ROLL_MS = 2000
 /** P1-4：partial / 检测通道轮询节拍 100ms（墙钟衡量，帧长无关；阶段二降低 isSpeech 帧级检测延迟）。 */
 const PARTIAL_INTERVAL_MS = 100
-/** partial 预览下限/上限（流式模型代价低，上限放宽）。 */
+/** 临时结果对应的段长上下限；Host 对快照做有界整段推理。 */
 const PARTIAL_MIN_S = 0.4
 const PARTIAL_MAX_S = 30
 /** ScriptProcessor 缓冲必须为 2 的幂（已知坑）。 */
@@ -590,8 +583,8 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         yieldedSegment = true
         config.onBackchannel?.()
       }
-      // P2-1：host Silero VAD 端点提示（静音 ≥0.5s 判句完成）→ 立即定稿。
-      // 客户端静音计时（silenceMs）保留为 VAD 模型缺失/超时兜底。
+      // 兼容 Host 主动端点提示；MeetScribe 的 Orca 运行时不发此标记，
+      // 会议分段由下方浏览器 silenceMs 静音计时决定。
       // I3：hold 按住期间不判端点（松手才发，防思考停顿被拆句）。
       if (out.endpoint && active && speechActive && !holdActive) finalizeSegment()
     } catch {
@@ -717,7 +710,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
   }
 
   /** 清空 wake 待机段（本地缓冲 + 段纪元 + host 流），三处触发共用：
-   *  朗读开始（自聊防护）/ 静音到点（停口重开）/ 30s 滚窗（上限兜底）。
+   *  朗读开始（自聊防护）/ 静音到点（停口重开）/ 12s 滚窗（上限兜底）。
    *  `segmentEpoch++` 作废在途 partial 响应——否则其会把已归零的 uploadedSamples
    *  水位写回旧值，后续增量对重置后的空 host 流只发尾部（段丢头）。 */
   const clearWakeSegment = (): void => {
@@ -820,7 +813,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         const body = useFull ? (sliceChunks(recoverySegment, 0).buffer as ArrayBuffer) : (samples.buffer as ArrayBuffer)
         let res: Response
         try {
-          res = await fetch(asrUrl(true, off, epochSnapshot), { signal: AbortSignal.timeout(25000), // Issue #15 批 4：对齐 host SenseVoice race 上限 20s（asr-host.ts:598-606）——原 10s 必触发一次空转重试
+          res = await fetch(asrUrl(true, off, epochSnapshot), { signal: AbortSignal.timeout(25000), // 给 Orca 模型冷启动与整段原生推理预留时间
             method: 'POST',
             headers: { 'content-type': 'application/octet-stream' },
             body,
@@ -837,7 +830,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
             setTimeout(async () => {
               try {
                 resolve(
-                  await fetch(asrUrl(true, off, epochSnapshot), { signal: AbortSignal.timeout(25000), // Issue #15 批 4：对齐 host SenseVoice race 上限 20s（asr-host.ts:598-606）——原 10s 必触发一次空转重试
+                  await fetch(asrUrl(true, off, epochSnapshot), { signal: AbortSignal.timeout(25000), // 给 Orca 模型冷启动与整段原生推理预留时间
                     method: 'POST',
                     headers: { 'content-type': 'application/octet-stream' },
                     body,
@@ -877,7 +870,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
             // I2 修复：re-enter 已 asr.reset 清空 host 流，从 0 全量重发（恢复段引用），
             // 否则 host 只收到尾巴、定稿缺前半句（确定性丢首段）。
             try {
-              res = await fetch(asrUrl(true, 0, epochSnapshot), { signal: AbortSignal.timeout(25000), // Issue #15 批 4：对齐 host SenseVoice race 上限 20s（asr-host.ts:598-606）——原 10s 必触发一次空转重试
+              res = await fetch(asrUrl(true, 0, epochSnapshot), { signal: AbortSignal.timeout(25000), // 给 Orca 模型冷启动与整段原生推理预留时间
                 method: 'POST',
                 headers: { 'content-type': 'application/octet-stream' },
                 body: sliceChunks(recoverySegment, 0).buffer as ArrayBuffer,
@@ -912,10 +905,8 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         // P1-5+：定稿就绪边界（final-ready）。
         //
         // 「submitted」= 定稿**上传发起**；「final-ready」= 定稿**文本可用**。两者之间
-        // 是宿主定稿耗时——zipformer 尾垫定稿与 SenseVoice 整段重译并行计算，但关键路径
-        // 会等 SenseVoice（asr-host.ts `finalizeP` 末尾 `await senseP`，上限 20s），
-        // 所以这一段可能从亚秒级一直到 20s 量级。不补这个边界，宿主定稿与随后的
-        // LLM 首 token 会被并进同一区间，无法定位慢在哪一层（长段定稿实测解码 20.7s）。
+        // 是 Orca 完整音频段的本地原生推理耗时。保留独立边界，便于区分网络上传、
+        // 模型计算和随后的 LLM 首 token，不把不同阶段的延迟混在一起。
         //
         // 轮次守卫：新一轮「说完」已发生（telemetryRound 前进）→ 丢弃本轮迟到事件，
         // 否则会污染新一轮的链（链在 'utterance-end' 时被清空）。
@@ -993,7 +984,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     // 批 7O：detect 经探测落 manual 时同样丢弃非按压帧（runtimeBargeInMode 已解析）。
     if (runtimeBargeInMode === 'manual' && !holdActive) return
     // 跨平台守卫：Safari 等浏览器会忽略 AudioContext({sampleRate}) 选项，
-    // 实际按 44.1k/48k 输出。非 16k 时先线性重采样，保证 host zipformer2
+    // 实际按 44.1k/48k 输出。非 16k 时先线性重采样，保证 Orca SenseVoice
     // 始终收到 16k PCM（避免识别错乱）。
     let data = ctxRate !== SAMPLE_RATE ? resampleLinear(raw, ctxRate, SAMPLE_RATE) : raw
     // fixture 录制（ADR-0004，默认关闭）：留住 AEC 前的 mic 与参考窗，供离线重放。
@@ -1609,8 +1600,8 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     beginHeld() {
       if (!active || holdActive) return
       holdActive = true
-      // 不在此置 forcePending：hold 期间 30s 滚段定稿应只累积（松手才发），
-      // force 统一由 endHeld 松手时置位，避免按住 >30s 被提前发送。
+      // 不在此置 forcePending：hold 期间 12s 滚段定稿应只累积（松手才发），
+      // force 统一由 endHeld 松手时置位，避免按住 >12s 被提前发送。
       segmentEpoch++ // 作废迟到的 wake/旧段 partial
       discardGen++ // 弃段令牌推进：作废在途定稿（hold 新段开始，上一段文本作废）
       wakeConsumed = false // 新段重新起算词头消费
@@ -1715,7 +1706,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         silenceMs = 0
         prePad = []
         speechActive = false
-        utteranceEndAt = null // M2：取消段重置「说完」标记（对齐 beginHeld——否则 30s 滚段定稿置过的 utteranceEndAt 会让下一段 chain 不上报）
+        utteranceEndAt = null // M2：取消段重置「说完」标记（对齐 beginHeld——否则 12s 滚段定稿置过的 utteranceEndAt 会让下一段 chain 不上报）
         forcePending = false // 对抗性审查 Fix：取消段不得泄漏 force 标记（否则下段静默绕过 autoSend=false）
         setState(wakeEnabled ? 'wake' : 'listening')
         return

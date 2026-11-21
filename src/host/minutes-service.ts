@@ -34,16 +34,21 @@ function metadataFor(meeting: Meeting): MeetingMetadata {
   }
 }
 
+export function buildTranscriptForMinutes(meeting: Meeting): Array<{ segmentId: string; speaker: string; text: string }> {
+  const names = new Map(meeting.speakers.map((speaker) => [speaker.id, speaker.name]))
+  return meeting.segments.map((segment) => ({
+    segmentId: segment.id,
+    speaker: names.get(segment.speakerId) || '发言人',
+    // 术语纠正在 ASR 出口完成；生成纪要使用纠正后的展示文本，原始模型文本仍独立留存。
+    text: segment.displayText || segment.rawText,
+  }))
+}
+
 /** Explicit user action: only this path sends transcript text to the configured DSH LLM. */
 export async function generateWordMinutes(ctx: Context, store: MeetingStore, settings: MeetScribeSettings, meetingId: string): Promise<Meeting> {
   const meeting = store.get(meetingId)
   if (!meeting) throw new Error('会议不存在')
-  const names = new Map(meeting.speakers.map((speaker) => [speaker.id, speaker.name]))
-  const transcript = meeting.segments.map((segment) => ({
-    segmentId: segment.id,
-    speaker: names.get(segment.speakerId) || '发言人',
-    text: segment.rawText,
-  }))
+  const transcript = buildTranscriptForMinutes(meeting)
   const metadata = metadataFor(meeting)
   const prompt = buildMinutesPrompt(JSON.stringify(transcript), metadata)
   const response = await completeWithDefaultModel(ctx, MINUTES_SYSTEM_PROMPT, prompt)

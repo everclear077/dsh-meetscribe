@@ -2,9 +2,9 @@ import { join } from 'node:path'
 import { ensureUrlFile } from './download.ts'
 import { SpeakerClusterer } from '../shared/speaker.ts'
 
-const SPEAKER_MODEL_FILE = '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx'
+const SPEAKER_MODEL_FILE = '3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx'
 const SPEAKER_MODEL_URL = `https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/${SPEAKER_MODEL_FILE}`
-const SPEAKER_MODEL_SHA256 = '53cab20ba8f2eb2f6e2d89ecc18e88ef3222169b61b4419cbc13666744a4574b'
+const SPEAKER_MODEL_SHA256 = 'eda0bf86422a9725a3523d5a1d3d75dedf340664e0ba65cfc1c7b2a78b6cf0b5'
 
 interface SpeakerExtractor {
   createStream(): {

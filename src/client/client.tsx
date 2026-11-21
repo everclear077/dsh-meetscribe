@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { MeetingApp } from './meeting.tsx'
-import { MeetingSettings } from './settings.tsx'
+import { MeetScribeWorkspace } from './workspace.tsx'
 import { Mark } from './components.tsx'
 import { meetings } from './meeting-controller.ts'
 import { styles } from './styles.ts'
@@ -18,7 +18,11 @@ interface ClientContext {
 }
 
 function OpenButton(): ReactNode {
-  return <button className="ms-root ms-icon" style={{ color: '#526579', width: 32, height: 32 }} title="MeetScribe 会议记录 (Ctrl+E)" onClick={meetings.toggle}><Mark /></button>
+  return <button className="ms-root ms-icon ms-open-button" style={{ width: 32, height: 32 }} title="MeetScribe 会议记录 (Ctrl+E)" onClick={meetings.toggle}><Mark /></button>
+}
+
+function PanelIcon(): ReactNode {
+  return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4" /></svg>
 }
 
 export const name = 'dsh-meetscribe'
@@ -31,6 +35,18 @@ export function apply(ctx: ClientContext): void {
     style.id = 'dsh-meetscribe-styles'
     style.textContent = styles
     document.head.appendChild(style)
+    const themeMedia = window.matchMedia('(prefers-color-scheme: dark)')
+    const syncTheme = (): void => {
+      const declared = [document.documentElement, document.body]
+        .map((element) => `${element.className} ${element.getAttribute('data-theme') ?? ''} ${element.getAttribute('data-color-scheme') ?? ''}`)
+        .join(' ').toLowerCase()
+      document.documentElement.dataset.msTheme = declared.includes('dark') || (!declared.includes('light') && themeMedia.matches) ? 'dark' : 'light'
+    }
+    const themeObserver = new MutationObserver(syncTheme)
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-color-scheme'] })
+    if (document.body) themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-color-scheme'] })
+    themeMedia.addEventListener('change', syncTheme)
+    syncTheme()
     void meetings.init()
     const keydown = (event: KeyboardEvent): void => {
       if (shortcutRegistered) return
@@ -41,11 +57,20 @@ export function apply(ctx: ClientContext): void {
     }
     window.addEventListener('keydown', keydown)
     window.addEventListener('dsh-meetscribe:toggle', meetings.toggle)
-    return () => { style.remove(); window.removeEventListener('keydown', keydown); window.removeEventListener('dsh-meetscribe:toggle', meetings.toggle); meetings.dispose() }
+    return () => {
+      style.remove()
+      themeObserver.disconnect()
+      themeMedia.removeEventListener('change', syncTheme)
+      delete document.documentElement.dataset.msTheme
+      window.removeEventListener('keydown', keydown)
+      window.removeEventListener('dsh-meetscribe:toggle', meetings.toggle)
+      meetings.dispose()
+    }
   })
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'meetscribe.overlay', order: 80 }, MeetingApp))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({ name: 'conversation.input.right', id: 'meetscribe.open', order: 80 }, OpenButton))
-  ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'meetscribe', order: 90, label: () => 'MeetScribe 会议记录' }, MeetingSettings))
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: 'dsh-meetscribe', order: 70, label: () => 'MeetScribe' }, PanelIcon))
+  ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: 'dsh-meetscribe' }, MeetScribeWorkspace))
   ctx.effect(() => ctx.sidebarRightTabs.register({ id: 'dsh-meetscribe', kind: 'meetscribe', title: () => '会议记录', keepMounted: true }))
   ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: 'dsh-meetscribe' }, MeetingApp))
   try {

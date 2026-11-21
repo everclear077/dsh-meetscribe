@@ -12,8 +12,8 @@ await build({
   outfile: join(outdir, 'index.js'),
   format: 'esm',
   platform: 'node',
-  target: 'node20',
-  external: ['@deepseek-ai/cordis', 'sherpa-onnx', 'sherpa-onnx-node', 'node:*'],
+  target: 'node22',
+  external: ['@deepseek-ai/cordis', 'sherpa-onnx-node', 'transcribe-cpp', 'node:*'],
 })
 await build({
   ...common,
@@ -21,17 +21,8 @@ await build({
   outfile: join(outdir, 'word/index.js'),
   format: 'esm',
   platform: 'node',
-  target: 'node20',
+  target: 'node22',
   external: ['node:*'],
-})
-await build({
-  ...common,
-  entryPoints: ['src/host/sense-worker.ts'],
-  outfile: join(outdir, 'sense-worker.mjs'),
-  format: 'esm',
-  platform: 'node',
-  target: 'node20',
-  external: ['sherpa-onnx', 'node:*'],
 })
 const worklet = await build({
   entryPoints: ['src/client/audio-worklet.ts'],
@@ -47,9 +38,9 @@ await build({
   format: 'cjs',
   platform: 'browser',
   jsx: 'automatic',
-  external: ['react', 'react/jsx-runtime'],
+  external: ['react', 'react/jsx-runtime', 'react-dom'],
   define: { __AUDIO_WORKLET__: JSON.stringify(worklet.outputFiles[0].text) },
   banner: { js: `window.__ModuleLoader__.load({ id: 'dsh-meetscribe', factory: (require) => {\nvar module = { exports: {} }; var exports = module.exports;` },
   footer: { js: 'return module.exports; } });' },
 })
-console.log('[dsh-meetscribe] Built host, worker and browser client.')
+console.log('[dsh-meetscribe] Built Orca ASR host, Word entry and browser client.')

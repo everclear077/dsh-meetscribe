@@ -176,8 +176,41 @@ export class MeetingStore {
     return meeting
   }
 
+  async clearTranscript(id: string): Promise<Meeting> {
+    const previous = this.require(id)
+    const now = new Date().toISOString()
+    const blank: Meeting = {
+      id: randomUUID(),
+      title: previous.title,
+      status: 'idle',
+      createdAt: now,
+      updatedAt: now,
+      metadata: {
+        ...previous.metadata,
+        attendees: [...previous.metadata.attendees],
+        absentees: [...previous.metadata.absentees],
+      },
+      speakers: [],
+      segments: [],
+      vocabulary: [],
+      generatedFiles: previous.generatedFiles.map((file) => ({ ...file })),
+    }
+    // Use a fresh meeting id so an in-flight final ASR request from the old recording
+    // cannot repopulate the cleared transcript. Wait for old writes before unlinking.
+    await this.delete(id)
+    this.meetings.set(blank.id, blank)
+    await this.persist(blank)
+    this.emit({ type: 'meeting-updated', meetingId: blank.id })
+    return blank
+  }
+
+  async deleteAll(): Promise<void> {
+    for (const id of [...this.meetings.keys()]) await this.delete(id)
+  }
+
   async delete(id: string): Promise<void> {
     this.meetings.delete(id)
+    await this.writes.get(id)?.catch(() => undefined)
     await rm(join(this.directory, `${id}.json`), { force: true })
     this.emit({ type: 'meeting-deleted', meetingId: id })
   }

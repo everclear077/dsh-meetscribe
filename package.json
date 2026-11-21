@@ -15,7 +15,7 @@
     "url": "https://github.com/everclear077/dsh-meetscribe/issues"
   },
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=22.0.0",
     "dsh": ">=0.1.7 <0.3.0-0"
   },
   "exports": {
@@ -41,6 +41,7 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "sample:word": "npm run build && node scripts/generate-word-sample.mjs",
     "sample:ui": "node scripts/ui-gallery.mjs",
+    "smoke:orca": "node scripts/smoke-orca-asr.mjs",
     "prepack": "npm run build",
     "verify": "npm run typecheck && npm test"
   },
@@ -54,7 +55,6 @@
       "inject": [
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-layout",
-        "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-sidebar-right",
         "@deepseek-ai/dsh-client-shortcuts"
       ]
@@ -63,8 +63,8 @@
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.5",
     "docx": "^9.5.1",
-    "sherpa-onnx": "^1.13.6",
-    "sherpa-onnx-node": "1.13.6"
+    "sherpa-onnx-node": "1.13.6",
+    "transcribe-cpp": "^0.4.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -86,7 +86,8 @@
     "meeting-minutes",
     "speech-to-text",
     "speaker-diarization",
-    "sherpa-onnx",
+    "transcribe-cpp",
+    "sherpa-onnx-node",
     "docx",
     "local-first"
   ],

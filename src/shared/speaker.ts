@@ -42,7 +42,7 @@ function normalized(values: ArrayLike<number>): Float32Array {
 export class SpeakerClusterer {
   private readonly centroids = new Map<string, SpeakerCentroid>()
 
-  constructor(private readonly threshold = 0.62, private readonly maxSpeakers = 8) {}
+  constructor(private readonly threshold = 0.56, private readonly maxSpeakers = 8) {}
 
   reset(): void {
     this.centroids.clear()

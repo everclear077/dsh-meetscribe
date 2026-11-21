@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createReadStream } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import { createAsrRuntime, pcmToSamples } from './host/asr-runtime.ts'
+import { createAsrRuntime, pcmToSamples } from './host/orca-asr-runtime.ts'
 import { MeetingStore } from './host/meeting-store.ts'
 import { SettingsStore } from './host/settings.ts'
 import { SpeakerIdentifier } from './host/speaker-identifier.ts'
@@ -12,13 +12,20 @@ import { removeFillerWords } from './shared/speaker.ts'
 import type { Meeting, MeetScribeSettings, ModelProgress } from './shared/types.ts'
 import { startGlobalHotkeyHelper, stopGlobalHotkeyHelper } from './host/native-helper.ts'
 import { generateWordMinutes } from './host/minutes-service.ts'
+import { selectWindowsDirectory } from './host/folder-picker.ts'
+import { createAsrReplacer } from './host/text-replacements.ts'
 
 export const name = 'meetscribe'
 export { MeetingStore } from './host/meeting-store.ts'
 export { SettingsStore } from './host/settings.ts'
 export { SpeakerIdentifier } from './host/speaker-identifier.ts'
 export { SpeakerClusterer, cosineSimilarity, removeFillerWords } from './shared/speaker.ts'
+export { createAsrReplacer } from './host/text-replacements.ts'
+export { normalizeAsrReplacements, parseAsrReplacements, formatAsrReplacements } from './shared/vocabulary.ts'
+export { collectMinutesDocuments, queryMinutesDocuments } from './shared/documents.ts'
 export { completeWithDefaultModel } from './host/llm.ts'
+export { buildTranscriptForMinutes } from './host/minutes-service.ts'
+export { createAsrRuntime, pcmToSamples, resolveOrcaModelPaths } from './host/orca-asr-runtime.ts'
 export const inject = ['webServer']
 
 const BASE_PATH = '/meetscribe'
@@ -92,18 +99,28 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
     for (const client of clients) client.write(frame)
   }
 
+  let replacementRules = settings.get().asrReplacements
+  let replaceAsrText = createAsrReplacer(replacementRules)
   const asr = createAsrRuntime({
-    cacheDir: modelRoot,
-    modelHost: () => settings.get().modelHost,
-    senseVoice: () => settings.get().senseVoice,
-    silenceMs: () => settings.get().silenceMs,
     senseITN: () => settings.get().senseITN,
-    allowCustomHost: false,
-    bargeInMode: () => 'auto',
+    replaceText: (text) => {
+      const rules = settings.get().asrReplacements
+      if (rules !== replacementRules) {
+        replacementRules = rules
+        replaceAsrText = createAsrReplacer(rules)
+      }
+      return replaceAsrText(text)
+    },
     broadcast: (event, payload) => {
       if (event === 'asr-progress') lastProgress = payload as ModelProgress
-      if (event === 'asr-ready') lastProgress = null
-      if (event === 'asr-error') lastModelError = '模型下载或校验失败，请检查网络后重试'
+      if (event === 'asr-ready') {
+        lastProgress = null
+        lastModelError = ''
+      }
+      if (event === 'asr-error') {
+        const detail = payload as { message?: unknown }
+        lastModelError = typeof detail?.message === 'string' ? detail.message : 'Orca 模型加载失败，请检查本机模型后重试'
+      }
       send(event, payload)
     },
   })
@@ -135,14 +152,17 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
     return {
       ...status,
       speaker,
-      loading: lastProgress !== null || speaker.loading,
-      error: lastModelError || undefined,
+      loading: status.loading || lastProgress !== null || speaker.loading,
+      error: lastModelError || status.error || undefined,
     }
   }
 
   async function downloadModels(): Promise<void> {
     lastModelError = ''
-    asr.warmup()
+    const asrReady = await asr.retryModel('asr')
+    if (!asrReady) throw new Error(lastModelError || asr.modelStatus().error || 'Orca 识别模型不可用')
+    const vadReady = await asr.retryModel('vad')
+    if (!vadReady) throw new Error(lastModelError || asr.modelStatus().error || 'Orca VAD 模型不可用')
     if (settings.get().speakerEnabled) {
       const ok = await speakerIdentifier.ready()
       if (!ok) throw new Error('说话人模型下载或校验失败')
@@ -209,6 +229,10 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       respondJson(res, 400, { error: '无效音频数据' })
       return
     }
+    if (url.searchParams.get('vadOnly') === '1') {
+      respondJson(res, 200, await asr.detect(meetingId, samples))
+      return
+    }
     collectAudio(meetingId, epoch, offset, samples)
     const epochKey = `${meetingId}:${epoch}`
     if (finalizedEpochs.has(epochKey)) {
@@ -226,6 +250,11 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
     if (!final || result.loading) {
       if (result.loading) finalizedEpochs.delete(epochKey)
       respondJson(res, result.loading ? 202 : 200, result)
+      return
+    }
+    if (final && !store.get(meetingId)) {
+      clearAudio(meetingId, epoch)
+      respondJson(res, 409, { error: '会议已清空或删除，已丢弃旧识别结果' })
       return
     }
     if (!result.text.trim()) {
@@ -252,7 +281,7 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       source: url.searchParams.get('source') === 'system' || url.searchParams.get('source') === 'mixed' ? 'system' : 'microphone',
       startMs: Math.max(0, endMs - Math.round(segmentAudio.length / 16)),
       endMs,
-      rawText: result.text,
+      rawText: result.rawText ?? result.text,
       displayText: current.fillerRemoval ? removeFillerWords(result.text) : result.text,
       speakerConfidence: speaker?.confidence,
       embedding: speaker?.embedding,
@@ -296,6 +325,10 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       await handleAsr(req, res, url)
       return
     }
+    if (path === '/settings/select-directory' && req.method === 'POST') {
+      respondJson(res, 200, { path: await selectWindowsDirectory() })
+      return
+    }
     if (path === '/settings') {
       if (req.method === 'GET') {
         respondJson(res, 200, settings.get())
@@ -324,6 +357,18 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
     }
     if (path === '/meetings' && req.method === 'GET') {
       respondJson(res, 200, store.list().map(summarizeMeeting))
+      return
+    }
+    if (path === '/meetings' && req.method === 'DELETE') {
+      const all = store.list()
+      for (const meeting of all) {
+        asr.reset(meeting.id)
+        clearAudio(meeting.id)
+        speakerIdentifier.reset(meeting.id)
+      }
+      activeMeetingId = null
+      await store.deleteAll()
+      respondJson(res, 200, { ok: true })
       return
     }
     if (path === '/meetings' && req.method === 'POST') {
@@ -364,6 +409,15 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       respondJson(res, 200, { ok: true })
       return
     }
+    if (action === 'clear' && req.method === 'POST') {
+      asr.reset(meetingId)
+      clearAudio(meetingId)
+      speakerIdentifier.reset(meetingId)
+      if (activeMeetingId === meetingId) activeMeetingId = null
+      const cleared = await store.clearTranscript(meetingId)
+      respondJson(res, 200, publicMeeting(cleared))
+      return
+    }
     if (action === 'start' && req.method === 'POST') {
       activeMeetingId = meetingId
       asr.reset(meetingId)
@@ -375,6 +429,9 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       return
     }
     if (action === 'pause' && req.method === 'POST') {
+      asr.reset(meetingId)
+      clearAudio(meetingId)
+      if (activeMeetingId === meetingId) activeMeetingId = null
       const updated = await store.update(meetingId, { status: 'paused' })
       respondJson(res, 200, publicMeeting(updated))
       return

@@ -6,7 +6,7 @@ MeetScribe 默认在本地完成音频处理、语音识别、说话人嵌入和
 
 只有用户明确点击“生成纪要”后，插件才会把以下文本发送到 DeepSeek Harness 当前选择的模型：
 
-- 原始逐字稿及说话人名称；
+- 术语纠正后的展示逐字稿及说话人名称；
 - 用户填写的会议名称、主题、地点、主持人、记录人、参会人等元数据；
 - 用于约束结构化 Word 输出的提示词。
 
@@ -20,7 +20,15 @@ Windows 默认目录：
 %LOCALAPPDATA%\dsh-meetscribe\
 ├─ settings.json
 ├─ meetings\       # 每场会议一个 JSON，含文本和声纹嵌入
-└─ models\         # 本地 ASR/VAD/SenseVoice/CAM++ 模型
+└─ models\speaker\ # ERes2NetV2 声纹模型（仅此处仍由插件下载）
+```
+
+Orca ASR/VAD 权重只从以下既有目录读取，由 Orca 自己管理：
+
+```text
+%APPDATA%\orca\speech-models\
+├─ sense-voice-zh-en-ja-ko-yue\SenseVoiceSmall-Q8_0.gguf
+└─ silero-vad-v6.2\silero-vad-v6.2-F32.gguf
 ```
 
 Word 默认输出到 `%USERPROFILE%\Documents\MeetScribe`。
@@ -33,8 +41,8 @@ Word 默认输出到 `%USERPROFILE%\Documents\MeetScribe`。
 - 非 GET/HEAD 请求执行同源检查。
 - JSON 和音频请求有大小限制。
 - 文档下载只允许读取会议中已登记的生成文件。
-- 模型主机使用允许列表；重定向继续校验目标主机。
-- 下载写入 `.part` 临时文件，SHA-256 校验通过后才替换正式文件。
+- Orca ASR/VAD 不经过插件网络下载；插件检查本地文件并由 transcribe.cpp 实际加载。
+- 声纹模型使用固定 GitHub release 来源；下载写入临时文件，SHA-256 校验通过后才替换正式文件。
 
 ## Word 与提示词约束
 

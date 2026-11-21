@@ -1,18 +1,19 @@
 import { useSyncExternalStore } from 'react'
 import type { Meeting, MeetingMetadata } from '../shared/types.ts'
 import { createAsrEngine, type AsrEngine } from './asr.ts'
-import { acquireMeetingAudio, releaseMeetingAudio, type CaptureSource } from './audio.ts'
+import { acquireMeetingAudio, releaseMeetingAudio } from './audio.ts'
 import { api } from './api.ts'
 
 export interface MeetingState {
   ready: boolean
   open: boolean
+  minimized: boolean
   expanded: boolean
   tab: 'transcript' | 'details' | 'files' | 'history'
   meetings: Meeting[]
   current: Meeting | null
   pending: string
-  source: CaptureSource
+  audioLevel: number
   busy: boolean
   generating: boolean
   error: string
@@ -21,8 +22,8 @@ export interface MeetingState {
 }
 
 const initial: MeetingState = {
-  ready: false, open: false, expanded: false, tab: 'transcript', meetings: [], current: null,
-  pending: '', source: 'microphone', busy: false, generating: false, error: '', notice: '', elapsed: 0,
+  ready: false, open: false, minimized: false, expanded: false, tab: 'transcript', meetings: [], current: null,
+  pending: '', audioLevel: 0, busy: false, generating: false, error: '', notice: '', elapsed: 0,
 }
 
 class MeetingController {
@@ -33,6 +34,7 @@ class MeetingController {
   private timer: ReturnType<typeof setInterval> | null = null
   private runSince = 0
   private accumulated = 0
+  private lastLevelAt = 0
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
@@ -71,11 +73,29 @@ class MeetingController {
     } catch (error) { this.fail(error); this.patch({ ready: true }) }
   }
 
-  toggle = (): void => { this.patch({ open: !this.state.open, error: '', notice: '' }) }
-  close = (): void => { this.patch({ open: false }) }
-  expand = (): void => { this.patch({ expanded: !this.state.expanded }) }
+  refresh = async (): Promise<void> => {
+    try {
+      const list = await api.meetings()
+      this.patch({ meetings: list, ready: true, error: '' })
+    } catch (error) { this.fail(error) }
+  }
+
+  toggle = (): void => {
+    if (this.state.open && !this.state.minimized) this.patch({ open: false, error: '', notice: '' })
+    else this.open()
+  }
+  open = (autoRecord = true): void => {
+    this.patch({ open: true, minimized: false, error: '', notice: '' })
+    if (!autoRecord || this.engine || this.state.busy) return
+    const status = this.state.current?.status
+    if (status === 'paused' || status === 'recording') void this.begin(true)
+    else void this.begin(false)
+  }
+  close = (): void => { this.patch({ open: false, minimized: false }) }
+  minimize = (): void => { this.patch({ minimized: true }) }
+  restore = (): void => { this.patch({ open: true, minimized: false }) }
+  expand = (): void => { this.patch({ expanded: !this.state.expanded, minimized: false }) }
   setTab = (tab: MeetingState['tab']): void => { this.patch({ tab }) }
-  setSource = (source: CaptureSource): void => { if (!this.engine) this.patch({ source }) }
   clearMessage = (): void => { this.patch({ error: '', notice: '' }) }
 
   select = async (id: string): Promise<void> => {
@@ -92,30 +112,46 @@ class MeetingController {
 
   private async begin(resume: boolean): Promise<void> {
     if (this.engine || this.state.busy) return
-    this.patch({ busy: true, error: '', notice: '' })
+    this.patch({ busy: true, error: '', notice: '', audioLevel: 0 })
+    let prepared: Meeting | null = null
     try {
       let meeting = this.state.current
       if (!meeting || meeting.status === 'completed') meeting = await api.create()
       meeting = await api.action(meeting.id, resume ? 'resume' : 'start')
+      prepared = meeting
+      this.patch({ current: meeting, meetings: [meeting, ...this.state.meetings.filter((item) => item.id !== meeting!.id)], pending: '' })
       if (!resume) this.accumulated = 0
       this.runSince = Date.now()
       const settings = await api.settings()
       const engine = createAsrEngine({
-        basePath: '/meetscribe', silenceMs: settings.silenceMs, mode: 'toggle', bargeInMode: 'auto', audioSource: this.state.source,
-        acquireAudio: () => acquireMeetingAudio(this.state.source),
+        basePath: '/meetscribe', silenceMs: settings.silenceMs, mode: 'toggle', bargeInMode: 'auto', audioSource: 'microphone',
+        acquireAudio: () => acquireMeetingAudio('microphone'),
         releaseAudio: releaseMeetingAudio,
       }, meeting.id)
       this.engine = engine
       engine.onPartial((pending) => this.patch({ pending }))
       engine.onSegment(() => this.patch({ pending: '' }))
       engine.onError((message) => this.patch({ error: message }))
+      engine.onLevel((level) => {
+        const now = Date.now()
+        if (now - this.lastLevelAt < 50) return
+        this.lastLevelAt = now
+        this.patch({ audioLevel: Math.max(level, this.state.audioLevel * 0.55) })
+      })
       await engine.start()
-      this.patch({ current: meeting, meetings: [meeting, ...this.state.meetings.filter((item) => item.id !== meeting!.id)], busy: false, pending: '', open: true })
+      this.patch({ current: meeting, meetings: [meeting, ...this.state.meetings.filter((item) => item.id !== meeting!.id)], busy: false, pending: '', audioLevel: 0 })
       this.clock(true)
     } catch (error) {
       await this.engine?.stop().catch(() => undefined)
       this.engine = null
       this.runSince = 0
+      this.clock(false)
+      if (prepared) {
+        const started = prepared
+        const paused = await api.action(started.id, 'pause').catch(() => started)
+        this.patch({ current: paused, meetings: [paused, ...this.state.meetings.filter((item) => item.id !== paused.id)] })
+      }
+      this.patch({ audioLevel: 0 })
       this.fail(error)
     }
   }
@@ -129,7 +165,7 @@ class MeetingController {
     try {
       await this.engine.stop(); this.engine = null
       this.accumulated = this.elapsed(); this.runSince = 0; this.clock(false)
-      this.patch({ current: await api.action(meeting.id, 'pause'), busy: false, pending: '' })
+      this.patch({ current: await api.action(meeting.id, 'pause'), busy: false, pending: '', audioLevel: 0 })
     } catch (error) { this.fail(error) }
   }
 
@@ -141,15 +177,67 @@ class MeetingController {
       await this.engine?.stop(); this.engine = null
       this.accumulated = this.elapsed(); this.runSince = 0; this.clock(false)
       const updated = await api.action(meeting.id, 'finish')
-      this.patch({ current: updated, busy: false, pending: '', elapsed: this.accumulated, notice: '会议已结束，逐字稿已保存在本机' })
+      this.patch({ current: updated, busy: false, pending: '', audioLevel: 0, elapsed: this.accumulated, notice: '会议已结束，逐字稿已保存在本机' })
     } catch (error) { this.fail(error) }
   }
 
-  recordButton = (): void => {
+  toggleRecording = (): void => {
     const status = this.state.current?.status
-    if (status === 'recording') void this.finish()
+    if (status === 'recording') void this.pause()
     else if (status === 'paused') void this.resume()
     else void this.start()
+  }
+
+  clear = async (): Promise<void> => {
+    const meeting = this.state.current
+    if (!meeting || this.state.busy) return
+    const wasRecording = !!this.engine || meeting.status === 'recording'
+    this.patch({ busy: true, error: '', notice: '' })
+    try {
+      await this.engine?.stop()
+      this.engine = null
+      this.accumulated = 0
+      this.runSince = 0
+      this.clock(false)
+      const cleared = await api.clear(meeting.id)
+      this.patch({
+        current: cleared,
+        meetings: [cleared, ...this.state.meetings.filter((item) => item.id !== meeting.id && item.id !== cleared.id)],
+        busy: false,
+        pending: '',
+        audioLevel: 0,
+        elapsed: 0,
+        notice: wasRecording ? '' : '逐字稿已清空',
+      })
+      if (wasRecording) await this.begin(false)
+    } catch (error) { this.fail(error) }
+  }
+
+  clearHistory = async (): Promise<void> => {
+    if (this.state.busy) return
+    const wasRecording = !!this.engine || this.state.current?.status === 'recording'
+    this.patch({ busy: true, error: '', notice: '' })
+    try {
+      await this.engine?.stop()
+      this.engine = null
+      this.accumulated = 0
+      this.runSince = 0
+      this.clock(false)
+      await api.clearHistory()
+      this.patch({
+        current: null,
+        meetings: [],
+        busy: false,
+        pending: '',
+        audioLevel: 0,
+        elapsed: 0,
+        tab: wasRecording ? 'transcript' : this.state.tab,
+        notice: wasRecording ? '' : '已清空全部历史会议',
+      })
+      if (wasRecording) await this.begin(false)
+    } catch (error) {
+      this.fail(error)
+    }
   }
 
   note = async (text: string): Promise<void> => {
@@ -175,11 +263,11 @@ class MeetingController {
   }
   generate = async (): Promise<void> => {
     if (!this.state.current || this.state.generating) return
-    if (this.engine) { this.patch({ error: '请先结束录音，再生成会议纪要' }); return }
+    if (this.engine) { this.patch({ error: '请先暂停录音，再生成会议纪要' }); return }
     this.patch({ generating: true, error: '', notice: '' })
     try {
       const meeting = await api.generate(this.state.current.id)
-      this.patch({ current: meeting, generating: false, tab: 'files', expanded: true, notice: 'Word 会议纪要已生成' })
+      this.patch({ current: meeting, generating: false, tab: 'files', expanded: true, minimized: false, notice: 'Word 会议纪要已生成' })
     } catch (error) { this.fail(error) }
   }
   dispose(): void {

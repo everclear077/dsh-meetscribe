@@ -62,11 +62,16 @@ export interface Meeting {
   generatedFiles: GeneratedFile[]
 }
 
+export interface AsrReplacement {
+  /** 识别器常听成的写法（一个或多个）。 */
+  from: string[]
+  /** 想要的标准写法。 */
+  to: string
+}
+
 export interface MeetScribeSettings {
   shortcut: string
   silenceMs: number
-  modelHost: string
-  senseVoice: boolean
   senseITN: boolean
   speakerEnabled: boolean
   speakerThreshold: number
@@ -75,6 +80,7 @@ export interface MeetScribeSettings {
   retainAudio: boolean
   preloadModels: boolean
   outputDir: string
+  asrReplacements: AsrReplacement[]
 }
 
 export interface ModelProgress {
@@ -107,15 +113,14 @@ export const DEFAULT_METADATA: MeetingMetadata = {
 
 export const DEFAULT_SETTINGS: MeetScribeSettings = {
   shortcut: 'Ctrl+E',
-  silenceMs: 1500,
-  modelHost: '',
-  senseVoice: true,
+  silenceMs: 800,
   senseITN: true,
   speakerEnabled: true,
-  speakerThreshold: 0.62,
+  speakerThreshold: 0.56,
   maxSpeakers: 8,
   fillerRemoval: false,
   retainAudio: false,
   preloadModels: true,
   outputDir: '',
+  asrReplacements: [],
 }

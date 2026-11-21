@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { DEFAULT_SETTINGS, type MeetScribeSettings } from '../shared/types.ts'
+import { normalizeAsrReplacements } from '../shared/vocabulary.ts'
 
 export function defaultOutputDirectory(): string {
   return join(process.env.USERPROFILE || process.env.HOME || '.', 'Documents', 'MeetScribe')
@@ -11,8 +12,6 @@ export function normalizeSettings(input: unknown): MeetScribeSettings {
   return {
     shortcut: typeof value.shortcut === 'string' && value.shortcut.length <= 40 ? value.shortcut : DEFAULT_SETTINGS.shortcut,
     silenceMs: clampNumber(value.silenceMs, 500, 5000, DEFAULT_SETTINGS.silenceMs),
-    modelHost: typeof value.modelHost === 'string' ? value.modelHost.slice(0, 200) : '',
-    senseVoice: typeof value.senseVoice === 'boolean' ? value.senseVoice : DEFAULT_SETTINGS.senseVoice,
     senseITN: typeof value.senseITN === 'boolean' ? value.senseITN : DEFAULT_SETTINGS.senseITN,
     speakerEnabled: typeof value.speakerEnabled === 'boolean' ? value.speakerEnabled : DEFAULT_SETTINGS.speakerEnabled,
     speakerThreshold: clampNumber(value.speakerThreshold, 0.4, 0.9, DEFAULT_SETTINGS.speakerThreshold),
@@ -21,6 +20,7 @@ export function normalizeSettings(input: unknown): MeetScribeSettings {
     retainAudio: typeof value.retainAudio === 'boolean' ? value.retainAudio : DEFAULT_SETTINGS.retainAudio,
     preloadModels: typeof value.preloadModels === 'boolean' ? value.preloadModels : DEFAULT_SETTINGS.preloadModels,
     outputDir: typeof value.outputDir === 'string' && value.outputDir.trim() ? value.outputDir.trim() : defaultOutputDirectory(),
+    asrReplacements: normalizeAsrReplacements(value.asrReplacements),
   }
 }
 

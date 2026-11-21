@@ -3,7 +3,7 @@
 ## 开发环境
 
 - Windows 10/11 x64（完整桌面验证）
-- Node.js 20+
+- Node.js 22+（transcribe.cpp 要求）
 - DeepSeek Harness Desktop
 - 可选：Microsoft Word 或 LibreOffice，用于 DOCX 渲染复核
 

@@ -1,10 +1,9 @@
 /**
  * 转写后替换表：把识别器反复听错的词（人名、产品名、英文词）改成想要的写法。
  *
- * 为什么不用热词：sherpa-onnx 的热词（contextual biasing）只支持 transducer 模型的
- * modified_beam_search；流式 zipformer 以汉字为建模单位，写不出「Sakina」这类英文词，
- * 而定稿用的 SenseVoice 是离线 CTC 模型，没有热词接口。所以统一在文本层处理，
- * 同时作用于中间结果和定稿，与具体模型无关。
+ * Orca 当前下载的 SenseVoice Small GGUF 不提供 vocabulary 或 context_prompt
+ * 能力，因此统一在 transcribe.cpp 的文本出口做明确配置的单次纠正。
+ * 临时快照和最终整段识别共用这一套规则，原始模型文本另行保留。
  *
  * 匹配规则：
  * - 不区分大小写；同一位置优先匹配更长的写法；一次扫描，替换结果不会再被匹配。
@@ -12,12 +11,9 @@
  * - 空白不敏感：中英交界处和写法里的空白都容许任意空白（「ski 男」与「ski男」等价），识别器常在中英之间插入空格。
  */
 
-export interface AsrReplacement {
-  /** 识别器常听成的写法（一个或多个）。 */
-  from: string[]
-  /** 想要的写法。 */
-  to: string
-}
+import type { AsrReplacement } from '../shared/types.ts'
+
+export type { AsrReplacement } from '../shared/types.ts'
 
 export type AsrReplacer = (text: string) => string
 
