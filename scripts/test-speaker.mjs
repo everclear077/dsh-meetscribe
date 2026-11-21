@@ -1,7 +1,9 @@
-import { SpeakerIdentifier } from '../lib/index.js'
+import { LocalModelManager, SpeakerIdentifier } from '../lib/index.js'
 import { join } from 'node:path'
 const modelRoot = join(process.env.LOCALAPPDATA, 'dsh-meetscribe', 'models')
-const identifier = new SpeakerIdentifier(join(modelRoot, 'speaker'), () => {})
+const manager = new LocalModelManager(modelRoot)
+const identifier = new SpeakerIdentifier(manager, () => {})
+if (!await identifier.prepare()) throw new Error(identifier.status().error || 'Speaker model did not load')
 const samples = new Float32Array(16000 * 2)
 for (let i = 0; i < samples.length; i++) samples[i] = Math.sin(i / 20) * 0.1
-console.log(await identifier.identify('native-smoke', samples, 0.62, 8))
+console.log(await identifier.identify('native-smoke', samples, 0.56, 8))

@@ -41,7 +41,7 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "sample:word": "npm run build && node scripts/generate-word-sample.mjs",
     "sample:ui": "node scripts/ui-gallery.mjs",
-    "smoke:orca": "node scripts/smoke-orca-asr.mjs",
+    "smoke:asr": "node scripts/smoke-local-asr.mjs",
     "prepack": "npm run build",
     "verify": "npm run typecheck && npm test"
   },

@@ -1,9 +1,9 @@
 import { readFile } from 'node:fs/promises'
-import { decodePcm16Wav } from './smoke-orca-asr.mjs'
+import { decodePcm16Wav } from './smoke-local-asr.mjs'
 
 const baseUrl = (process.argv[2] || process.env.MEETSCRIBE_URL || '').replace(/\/+$/, '')
 const wavPath = process.argv[3]
-if (!baseUrl || !wavPath) throw new Error('Usage: node scripts/smoke-harness-orca.mjs <http://127.0.0.1:port> <16k-mono-pcm16.wav>')
+if (!baseUrl || !wavPath) throw new Error('Usage: node scripts/smoke-harness-asr.mjs <http://127.0.0.1:port> <16k-mono-pcm16.wav>')
 const endpoint = `${baseUrl}/meetscribe`
 let meetingId = ''
 
@@ -24,7 +24,7 @@ try {
   const created = await request('/meetings', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ title: 'Orca 合成音频验证（自动清理）' }),
+    body: JSON.stringify({ title: '本地 合成音频验证（自动清理）' }),
   })
   meetingId = created.id
   await request(`/meetings/${encodeURIComponent(meetingId)}/start`, { method: 'POST' })
@@ -42,7 +42,7 @@ try {
     headers: { 'content-type': 'application/octet-stream' },
     body: Buffer.from(pcm.buffer, pcm.byteOffset, Math.min(pcm.byteLength, 6400)),
   })
-  if (typeof vad.isSpeech !== 'boolean') throw new Error(`Invalid Orca VAD response: ${JSON.stringify(vad)}`)
+  if (typeof vad.isSpeech !== 'boolean') throw new Error(`Invalid 本地 VAD response: ${JSON.stringify(vad)}`)
   let partialText = ''
   if (cut > 0 && cut < pcm.length) {
     await postPcm(false, 0, pcm.subarray(0, cut))
@@ -51,7 +51,7 @@ try {
       const partial = await postPcm(false, cut, pcm.subarray(0, 0))
       partialText = partial.text || ''
     }
-    if (!partialText) throw new Error('Host did not produce a temporary Orca snapshot within 5 seconds')
+    if (!partialText) throw new Error('Host did not produce a temporary 本地 snapshot within 5 seconds')
   }
   const result = await postPcm(true, cut, pcm.subarray(cut))
   if (!result.text || !result.segmentId) throw new Error(`Host returned no finalized transcript segment: ${JSON.stringify(result)}`)

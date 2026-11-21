@@ -43,4 +43,4 @@ await build({
   banner: { js: `window.__ModuleLoader__.load({ id: 'dsh-meetscribe', factory: (require) => {\nvar module = { exports: {} }; var exports = module.exports;` },
   footer: { js: 'return module.exports; } });' },
 })
-console.log('[dsh-meetscribe] Built Orca ASR host, Word entry and browser client.')
+console.log('[dsh-meetscribe] Built local ASR host, Word entry and browser client.')
