@@ -15,6 +15,10 @@ import {
 const safeName = (name: string): string => name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').trim().slice(0, 70) || '会议纪要'
 const time = (iso?: string): string => iso ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(iso)) : '待补充'
 
+export interface MinutesTemplateSnapshots {
+  snapshot(id: string | null): Promise<{ id: string; name: string; data: Buffer } | null>
+}
+
 function metadataFor(meeting: Meeting): MeetingMetadata {
   const format = { offline: '线下', online: '线上', hybrid: '混合' } as const
   return {
@@ -67,12 +71,16 @@ export async function generateWordMinutes(
   settings: MeetScribeSettings,
   meetingId: string,
   progress?: (update: MinutesProgressUpdate) => void,
+  templates?: MinutesTemplateSnapshots,
 ): Promise<Meeting> {
   const meeting = store.get(meetingId)
   if (!meeting) throw new Error('会议不存在')
   progress?.({ stage: 'preparing', progress: 10 })
   const request = buildMinutesRequest(meeting)
   const metadata = request.metadata
+  // Read and validate before the model request. The byte snapshot keeps this
+  // task stable even if the default is changed or the template is deleted.
+  const template = templates ? await templates.snapshot(settings.minutesTemplateId) : null
   progress?.({ stage: 'model', progress: 25, receivedChars: 0 })
   const response = await completeWithModel(ctx, request.system, request.user, {
     selection: settings.minutesModel,
@@ -94,6 +102,6 @@ export async function generateWordMinutes(
   await mkdir(settings.outputDir, { recursive: true })
   const version = Math.max(0, ...meeting.generatedFiles.map((file) => file.version)) + 1
   const output = join(settings.outputDir, `${safeName(meeting.title)}-纪要-v${version}.docx`)
-  await generateMinutesDocx(minutes, output)
+  await generateMinutesDocx(minutes, output, template ? { template: template.data } : {})
   return store.addGeneratedFile(meetingId, output)
 }

@@ -70,6 +70,14 @@ const previewMinutesModels = {
   ],
   errors: [],
 }
+let previewTemplates = {
+  selectedId: null as string | null,
+  templates: [
+    { id: 'builtin', name: '正式会议纪要', fileName: '内置模板', createdAt: '', bytes: 0, builtIn: true },
+    { id: '123e4567-e89b-42d3-a456-426614174000', name: '合成部门模板', fileName: '合成部门模板.docx', createdAt: now, bytes: 24576, builtIn: false },
+  ],
+}
+const templateCatalog = (): unknown => JSON.parse(JSON.stringify(previewTemplates))
 
 globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const path = String(input)
@@ -79,6 +87,14 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise
   if (path.includes('/conversation-prompt')) return Response.json({ prompt: '合成会议提示词' })
   if (path.includes('/models/status')) return Response.json({ asr: { ready: true, loaded: true, files: [{ exists: true }] }, vad: { ready: true, loaded: true }, speaker: { ready: true } })
   if (path.endsWith('/minutes-models')) return Response.json(previewMinutesModels)
+  if (path.includes('/documents/2/preview')) return new Response(new Uint8Array([37, 80, 68, 70, 45, 49, 46, 52]), { status: 200, headers: { 'content-type': 'application/pdf' } })
+  if (path.endsWith('/minutes-templates/default') && init?.method === 'PUT') {
+    const body = JSON.parse(String(init.body)) as { id: string | null }
+    previewTemplates = { ...previewTemplates, selectedId: body.id }
+    return Response.json(templateCatalog())
+  }
+  if (path.endsWith('/minutes-templates') && init?.method === 'POST') return Response.json({ id: '123e4567-e89b-42d3-a456-426614174001', name: '新上传合成模板', fileName: '新上传合成模板.docx', createdAt: now, bytes: 1024, builtIn: false }, { status: 201 })
+  if (path.endsWith('/minutes-templates')) return Response.json(templateCatalog())
   if (path.includes('/clear')) return Response.json({ ...meeting, id: 'preview-cleared', status: 'paused', speakers: [], segments: [] })
   if (path.includes('/settings') && init?.method === 'PUT') {
     previewSettings = { ...previewSettings, ...JSON.parse(String(init.body)) }

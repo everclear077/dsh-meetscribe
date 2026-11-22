@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import type { MeetingMetadata, Speaker } from '../shared/types.ts'
 import { meetings, useMeetings } from './meeting-controller.ts'
 import { Icon, Mark, clock, segmentTime } from './components.tsx'
+import { DocumentPreview, type DocumentPreviewTarget } from './document-preview.tsx'
 
 function Speakers({ speakers }: { speakers: Speaker[] }): ReactNode {
   const [editing, setEditing] = useState<string | null>(null)
@@ -89,10 +90,11 @@ function Details(): ReactNode {
 
 function Files(): ReactNode {
   const { current } = useMeetings()
+  const [preview, setPreview] = useState<DocumentPreviewTarget | null>(null)
   return <div className="ms-detail"><section className="ms-section"><h3>Word 会议纪要</h3>
     {!current?.generatedFiles.length && <div className="ms-empty"><strong>还没有生成文件</strong><small>暂停录音后点击“生成纪要”会将逐字稿发送给所选纪要模型；也可点击对话图标先创建草稿。</small></div>}
-    {[...(current?.generatedFiles ?? [])].reverse().map((file) => <div className="ms-file" key={file.version}><span className="ms-file-icon">W</span><div className="ms-file-info"><strong>{current!.title} · 第 {file.version} 版</strong><small>{new Date(file.createdAt).toLocaleString('zh-CN')}</small></div><a className="ms-action" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center' }} href={`/meetscribe/meetings/${encodeURIComponent(current!.id)}/documents/${file.version}`} download>下载 .docx</a></div>)}
-  </section></div>
+    {[...(current?.generatedFiles ?? [])].reverse().map((file) => <div className="ms-file" key={file.version}><span className="ms-file-icon">W</span><div className="ms-file-info"><strong>{current!.title} · 第 {file.version} 版</strong><small>{new Date(file.createdAt).toLocaleString('zh-CN')}</small></div><button type="button" className="ms-action" aria-label={`在 DSH 中打开 ${current!.title} 第 ${file.version} 版`} onClick={() => setPreview({ meetingId: current!.id, version: file.version, fileName: `${current!.title}-纪要-v${file.version}.docx` })}><Icon name="file" />打开</button></div>)}
+  </section>{preview && <DocumentPreview target={preview} onClose={() => setPreview(null)} />}</div>
 }
 
 function History(): ReactNode {

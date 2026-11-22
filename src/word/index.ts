@@ -2,7 +2,10 @@ export {
   buildMinutesDocx,
   createMinutesDocument,
   generateMinutesDocx,
+  type GenerateMinutesOptions,
+  type MinutesDocumentOptions,
 } from "./document.js";
+export { applyMinutesTemplate, validateMinutesTemplate } from "./template.js";
 export {
   MinutesValidationError,
   buildMinutesJson,

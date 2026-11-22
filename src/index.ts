@@ -1,6 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { createReadStream } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { createAsrRuntime, pcmToSamples } from './host/local-asr-runtime.ts'
@@ -17,6 +16,8 @@ import { listMinutesModels } from './host/llm.ts'
 import { MinutesTaskManager } from './host/minutes-tasks.ts'
 import { selectWindowsDirectory } from './host/folder-picker.ts'
 import { createAsrReplacer } from './host/text-replacements.ts'
+import { MinutesTemplateStore, MAX_TEMPLATE_BYTES } from './host/minutes-templates.ts'
+import { renderMinutesPdf } from './host/document-preview.ts'
 
 export const name = 'meetscribe'
 export { MeetingStore } from './host/meeting-store.ts'
@@ -27,8 +28,10 @@ export { createAsrReplacer } from './host/text-replacements.ts'
 export { normalizeAsrReplacements, parseAsrReplacements, formatAsrReplacements } from './shared/vocabulary.ts'
 export { collectMinutesDocuments, queryMinutesDocuments } from './shared/documents.ts'
 export { completeWithDefaultModel, completeWithModel, listMinutesModels } from './host/llm.ts'
-export { buildTranscriptForMinutes, buildConversationMinutesPrompt } from './host/minutes-service.ts'
+export { buildTranscriptForMinutes, buildConversationMinutesPrompt, generateWordMinutes } from './host/minutes-service.ts'
 export { MinutesTaskManager } from './host/minutes-tasks.ts'
+export { MinutesTemplateStore } from './host/minutes-templates.ts'
+export { renderMinutesPdf } from './host/document-preview.ts'
 export { createAsrRuntime, pcmToSamples } from './host/local-asr-runtime.ts'
 export { LOCAL_MODEL_CATALOG, LocalModelManager, localModelPath, resolveLocalModelPaths } from './host/model-manager.ts'
 export { ensureUrlFile, fileSha256 } from './host/download.ts'
@@ -91,6 +94,7 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
     : join(homedir(), '.local', 'share', 'dsh-meetscribe')
   const settings = new SettingsStore(join(dataRoot, 'settings.json'))
   const store = new MeetingStore(join(dataRoot, 'meetings'))
+  const templates = new MinutesTemplateStore(join(dataRoot, 'templates'))
   const modelRoot = join(dataRoot, 'models')
   const modelManager = new LocalModelManager(modelRoot)
   const clients = new Set<ServerResponse>()
@@ -142,6 +146,10 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
   const ready = (async () => {
     await settings.init()
     await store.init()
+    await templates.init()
+    if (!settings.get().minutesTemplateId || !templates.catalog(settings.get().minutesTemplateId).selectedId) {
+      if (settings.get().minutesTemplateId) await settings.save({ minutesTemplateId: null })
+    }
     if (settings.get().preloadModels) asr.warmup()
   })().catch((error) => {
     lastModelError = String(error)
@@ -392,6 +400,36 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       respondJson(res, 200, await listMinutesModels(ctx))
       return
     }
+    if (path === '/minutes-templates' && req.method === 'GET') {
+      respondJson(res, 200, templates.catalog(settings.get().minutesTemplateId))
+      return
+    }
+    if (path === '/minutes-templates' && req.method === 'POST') {
+      const fileName = url.searchParams.get('fileName') ?? ''
+      const uploaded = await templates.upload(fileName, await readBody(req, MAX_TEMPLATE_BYTES))
+      respondJson(res, 201, uploaded)
+      return
+    }
+    if (path === '/minutes-templates/default' && req.method === 'PUT') {
+      const body = await readJson(req)
+      const id = body.id === null ? null : String(body.id ?? '')
+      if (id !== null) await templates.snapshot(id)
+      const next = await settings.save({ minutesTemplateId: id })
+      send('settings', next)
+      respondJson(res, 200, templates.catalog(next.minutesTemplateId))
+      return
+    }
+    const templateMatch = path.match(/^\/minutes-templates\/([a-f0-9-]{36})$/)
+    if (templateMatch && req.method === 'DELETE') {
+      const id = templateMatch[1]
+      await templates.remove(id)
+      if (settings.get().minutesTemplateId === id) {
+        const next = await settings.save({ minutesTemplateId: null })
+        send('settings', next)
+      }
+      respondJson(res, 200, templates.catalog(settings.get().minutesTemplateId))
+      return
+    }
     if (path === '/meetings' && req.method === 'GET') {
       respondJson(res, 200, store.list().map(summarizeMeeting))
       return
@@ -567,23 +605,27 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
         respondJson(res, 400, { error: '当前会议还没有逐字稿，无法生成纪要' })
         return
       }
-      const task = minutesTasks.start(meeting, (progress) => generateWordMinutes(ctx, store, settings.get(), meetingId, progress))
+      const task = minutesTasks.start(meeting, (progress) => generateWordMinutes(ctx, store, settings.get(), meetingId, progress, templates))
       respondJson(res, 202, task)
       return
     }
-    const downloadMatch = action.match(/^documents\/(\d+)$/)
-    if (downloadMatch && req.method === 'GET') {
-      const version = Number(downloadMatch[1])
+    const previewMatch = action.match(/^documents\/(\d+)\/preview$/)
+    if (previewMatch && req.method === 'GET') {
+      const version = Number(previewMatch[1])
       const file = meeting.generatedFiles.find((item) => item.version === version)
       if (!file) {
         respondJson(res, 404, { error: '文件不存在' })
         return
       }
+      const preview = await renderMinutesPdf(ctx, file)
       res.writeHead(200, {
-        'content-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(basename(file.path))}`,
+        'content-type': 'application/pdf',
+        'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(basename(file.path).replace(/\.docx$/i, '.pdf'))}`,
+        'content-length': preview.pdf.byteLength,
+        'cache-control': 'private, no-store',
+        'x-content-type-options': 'nosniff',
       })
-      createReadStream(file.path).pipe(res)
+      res.end(Buffer.from(preview.pdf))
       return
     }
     respondJson(res, 405, { error: '不支持的操作' })

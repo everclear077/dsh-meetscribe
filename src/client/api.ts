@@ -1,4 +1,4 @@
-import type { Meeting, MeetScribeSettings, MinutesModelCatalog, MinutesTask } from '../shared/types.ts'
+import type { Meeting, MeetScribeSettings, MinutesModelCatalog, MinutesTask, MinutesTemplateCatalog, MinutesTemplateSummary } from '../shared/types.ts'
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
@@ -17,7 +17,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   meetings: () => request<Meeting[]>('/meetings'),
   meeting: (id: string) => request<Meeting>(`/meetings/${encodeURIComponent(id)}`),
-  documentUrl: (meetingId: string, version: number) => `/meetscribe/meetings/${encodeURIComponent(meetingId)}/documents/${version}`,
+  documentPreviewUrl: (meetingId: string, version: number) => `/meetscribe/meetings/${encodeURIComponent(meetingId)}/documents/${version}/preview`,
   create: (title?: string) => request<Meeting>('/meetings', { method: 'POST', body: JSON.stringify({ title }) }),
   clearHistory: () => request<{ ok: boolean }>('/meetings', { method: 'DELETE' }),
   update: (id: string, patch: Record<string, unknown>) => request<Meeting>(`/meetings/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
@@ -31,6 +31,17 @@ export const api = {
   conversationPrompt: (id: string) => request<{ prompt: string }>(`/meetings/${encodeURIComponent(id)}/conversation-prompt`, { method: 'POST', body: '{}' }),
   minutesTasks: () => request<MinutesTask[]>('/minutes-tasks'),
   minutesModels: () => request<MinutesModelCatalog>('/minutes-models'),
+  minutesTemplates: () => request<MinutesTemplateCatalog>('/minutes-templates'),
+  uploadMinutesTemplate: async (file: File): Promise<MinutesTemplateSummary> => {
+    const response = await fetch(`/meetscribe/minutes-templates?fileName=${encodeURIComponent(file.name)}`, {
+      method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file,
+    })
+    const value = await response.json().catch(() => ({})) as MinutesTemplateSummary & { error?: string }
+    if (!response.ok) throw new ApiError(value.error || `模板上传失败 (${response.status})`, response.status)
+    return value
+  },
+  selectMinutesTemplate: (id: string | null) => request<MinutesTemplateCatalog>('/minutes-templates/default', { method: 'PUT', body: JSON.stringify({ id }) }),
+  deleteMinutesTemplate: (id: string) => request<MinutesTemplateCatalog>(`/minutes-templates/${id}`, { method: 'DELETE' }),
   settings: () => request<MeetScribeSettings>('/settings'),
   saveSettings: (settings: Partial<MeetScribeSettings>) => request<MeetScribeSettings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   selectOutputDirectory: () => request<{ path: string | null }>('/settings/select-directory', { method: 'POST', body: '{}' }),

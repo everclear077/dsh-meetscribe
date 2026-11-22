@@ -3,6 +3,7 @@ import type { MeetScribeSettings, MinutesModelCatalog, MinutesModelOption, Minut
 import { formatAsrReplacements, parseAsrReplacements } from '../shared/vocabulary.ts'
 import { api } from './api.ts'
 import { Icon } from './components.tsx'
+import { MinutesTemplateManager } from './templates.tsx'
 
 interface ModelState {
   asr?: { ready: boolean; loaded: boolean; repo: string; variant?: string; files?: Array<{ exists: boolean }> }
@@ -166,6 +167,7 @@ export function MeetingSettings(): ReactNode {
       {minutesCatalog.errors.map((error, index) => <div className="ms-error" role="alert" key={`${index}:${error}`}>{error}</div>)}
       {!loadingMinutesModels && minutesCatalog.options.length === 0 && minutesCatalog.errors.length === 0 && <p className="ms-hint">DSH 尚未报告可用模型；可先在 DSH 的模型设置中配置 Provider。</p>}
     </section>
+    <MinutesTemplateManager />
     <section className="ms-section"><h3>识别与说话人</h3>
       <Toggle label="启用说话人区分" description="根据声纹自动聚类。先显示匿名发言人，可在浮窗顶部重命名或合并。" checked={settings.speakerEnabled} onChange={(speakerEnabled) => void save({ speakerEnabled })} />
       <Toggle label="逆文本规范化" description="把数字、日期等口语形式整理为更适合阅读的书面形式。" checked={settings.senseITN} onChange={(senseITN) => void save({ senseITN })} />

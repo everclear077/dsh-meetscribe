@@ -26,8 +26,10 @@ Harness Browser Client                             │
                                                     ├─ ERes2NetV2 embedding + 聚类
                                                     ├─ 原子 JSON 会议存储
                                                     ├─ Host 内存纪要任务 + SSE 进度
+                                                    ├─ 本地模板目录 + 不可信 DOCX 校验
                                                     ├─ 显式 LLM 调用 / DSH 对话草稿
-                                                    └─ 结构化校验 + 原生 DOCX
+                                                    ├─ 结构化校验 + 原生/自定义模板 DOCX
+                                                    └─ officeKit.convert → 内置 PDF 预览
 ```
 
 浮窗是 Harness 的 `shell.overlay`，不是独立原生窗口。Windows 助手只负责全局 Ctrl+E，不负责音频、识别或系统级浮窗。
@@ -52,11 +54,15 @@ Harness Browser Client                             │
 
 ### 独立文档工作台
 
-`workspace.tsx` 通过 `sidebar.panellist` 注册左侧 MeetScribe 图标，并以 `main` 插槽渲染完整主界面。默认“纪要文件”视图使用 `useMeetings()` 订阅现有会议存储，不建立第二份数据副本；`shared/documents.ts` 将每场会议的 `generatedFiles` 展平为文件条目，提供文件名/会议名称/路径搜索及名称、时间正倒序。每个版本使用原有 `/meetings/:id/documents/:version` 下载路由，不接受任意文件路径。
+`workspace.tsx` 通过 `sidebar.panellist` 注册左侧 MeetScribe 图标，并以 `main` 插槽渲染完整主界面。默认“纪要文件”视图使用 `useMeetings()` 订阅现有会议存储，不建立第二份数据副本；`shared/documents.ts` 将每场会议的 `generatedFiles` 展平为文件条目，提供文件名/会议名称/路径搜索及名称、时间正倒序。文件列表和已完成任务只提交 `meetingId + version` 到 `/meetings/:id/documents/:version/preview`，Host 从会议记录解析实际路径，Client 不接受或提交任意文件路径。
 
-“识别设置”复用 `MeetingSettings` 和既有 Settings/Model API；卸载 Harness `settings.section` 只改变入口，不改变设置持久化或识别行为。纪要模型区域另调用 `/minutes-models`，直接枚举 Harness 当前注册的 Provider/Model 和精确模型的 reasoning efforts。`minutesModel=null` 表示跟随 DSH；显式路由只用于新 Word 任务，不写回 DSH 默认模型。会议生成、删除和清空事件仍通过 SSE 更新同一控制器，工作台也可手动刷新摘要列表。
+`src/client/document-preview.tsx` 是独立工作台、已完成任务和浮窗“纪要文件”共用的预览组件。它获取 Host 返回的 PDF，强制检查 `application/pdf`，以 Object URL 在 MeetScribe 自己的 modal/iframe 中展示；卸载时中止请求并释放 URL。组件通过 React Portal 挂载到 `document.body` 并保留 `ms-root` 主题变量，避免被浮窗的 transform/overflow 层叠上下文裁剪或让浮窗盖住弹窗。它不调用 `shell.openExternal`、文件管理器或外部 Office。独立工作台不能假定右侧栏存在已挂载 Session，因此没有采用依赖 Session surface 的 `sidebarRight.openResource()`。
 
-工作台同时渲染 `state.minutesTasks`：running 任务固定在文档列表之前，展示准备、模型、解析和 Word 四阶段、单调进度及模型已接收字符数；失败卡片保留 Host 错误并提供重试，完成卡片按 `meetingId + version` 下载。导航显示进行中数量，空文档列表不会隐藏任务。Client 忽略乱序的旧任务快照，重试时用新 running 任务替换同会议 failed 卡片。
+“识别设置”复用 `MeetingSettings` 和既有 Settings/Model API；卸载 Harness `settings.section` 只改变入口，不改变设置持久化或识别行为。纪要模型区域另调用 `/minutes-models`，直接读取 DSH 对话选择器的同一份 `sessionController.modelCatalog()`，保持 Provider 分组、顺序和 reasoning 元数据。`minutesModel=null` 表示跟随 DSH；显式路由只用于新 Word 任务，不写回 DSH 默认模型。会议生成、删除和清空事件仍通过 SSE 更新同一控制器，工作台也可手动刷新摘要列表。
+
+`MinutesTemplateManager` 调用 `/minutes-templates` 上传、选择默认和删除本地模板。上传使用原始 File body，不在浏览器自行构造 multipart；列表只显示内置模板与本地索引中的用户模板，切换默认只影响之后的新任务。
+
+工作台同时渲染 `state.minutesTasks`：running 任务固定在文档列表之前，展示准备、模型、解析和 Word 四阶段、单调进度及模型已接收字符数；失败卡片保留 Host 错误并提供重试，完成卡片按 `meetingId + version` 打开内置 PDF 预览。导航显示进行中数量，空文档列表不会隐藏任务。Client 忽略乱序的旧任务快照，重试时用新 running 任务替换同会议 failed 卡片。
 
 ### 音频与分段
 
@@ -86,6 +92,10 @@ POST /models/download
 GET  /hotkey/status
 GET  /minutes-tasks
 GET  /minutes-models                    # 仅模型路由与能力元数据，无凭据
+GET  /minutes-templates
+POST /minutes-templates?fileName=...     # 原始 DOCX bytes，最大 10 MB
+PUT  /minutes-templates/default
+DELETE /minutes-templates/:uuid
 GET/POST/DELETE /meetings
 GET/PATCH/DELETE /meetings/:id
 POST /meetings/:id/start|pause|resume|finish|clear
@@ -95,12 +105,12 @@ POST /meetings/:id/speakers/merge
 POST /meetings/:id/segments/:segmentId/speaker
 POST /meetings/:id/generate                 # 202 + MinutesTask
 POST /meetings/:id/conversation-prompt      # 仅构造草稿文本，不调用 LLM
-GET  /meetings/:id/documents/:version
+GET  /meetings/:id/documents/:version/preview   # 仅 PDF inline；无原样 DOCX 下载路由
 ```
 
 `/models/download` 由 `LocalModelManager` 依次准备 ASR、VAD，并在启用说话人时准备声纹模型。每类文件按固定地址、大小和 SHA-256 下载或复用，完成后立即调用原生运行时加载；同一模型的并发准备任务共享 Promise。ASR/VAD 主地址连接失败会尝试内置备用镜像，完整性约束不变。启动预加载不触发下载；录音中的声纹懒加载只检查并加载已安装的有效文件，不会隐式下载。活动录音期间禁止安装或修复模型，模型准备期间 start/resume 返回 409，避免两条流程竞争。
 
-安全规则：loopback-only、写操作同源检查、请求体大小限制、Word 下载路径来自已登记文件，不接收任意文件路径。
+安全规则：loopback-only、写操作同源检查、请求体大小限制、Word 预览路径来自已登记文件，不接收任意文件路径。模板上传限制原始字节数，并在写入本地索引前完成 ZIP/XML 安全校验；模板目录不进入 Git，模板字节不进入 LLM 请求。
 
 ## 4. 本地模型、ASR、VAD 与说话人
 
@@ -169,7 +179,9 @@ Electron 环境禁止 native external ArrayBuffer，因此调用 `extractor.comp
 - 用户元数据和生成文件版本；
 - 改名、合并、逐段指派和订阅事件。
 
-写入流程为临时文件 → `rename`，删除旧会议前先等待其待处理写入，避免清空后的旧异步写入重新创建文件。启动时把异常中断的 recording 状态恢复为可操作状态。设置同样采用原子写入和范围校验；旧 `modelHost`、`senseVoice` 字段在读取时迁移丢弃，输出目录、800ms 分段、ITN 和术语表保持不变。新增 `minutesModel` 只保留 provider、model 和可选 reasoningEffort，未知字段（包括任何凭据字段）不会进入规范化结果；缺省为 null。`minutesIdleTimeoutMs` 限制在 60000–1800000，缺省 300000。
+写入流程为临时文件 → `rename`，删除旧会议前先等待其待处理写入，避免清空后的旧异步写入重新创建文件。启动时把异常中断的 recording 状态恢复为可操作状态。设置同样采用原子写入和范围校验；旧 `modelHost`、`senseVoice` 字段在读取时迁移丢弃，输出目录、800ms 分段、ITN 和术语表保持不变。新增 `minutesModel` 只保留 provider、model 和可选 reasoningEffort，未知字段（包括任何凭据字段）不会进入规范化结果；缺省为 null。`minutesIdleTimeoutMs` 限制在 60000–1800000，缺省 300000。`minutesTemplateId` 缺省为 null（内置模板），只接受自定义模板 UUID。
+
+`MinutesTemplateStore` 把用户 DOCX 和 `index.json` 保存在 `%LOCALAPPDATA%\dsh-meetscribe\templates`。用户文件名只用于显示，磁盘文件名为 UUID；上传先验证再写文件，索引原子更新，失败时回滚内存状态并清理未完成上传。目录接口始终包含内置模板；删除默认模板由 Host 路由把设置恢复为 null。`snapshot()` 每次重新读取并验证字节，返回的 Buffer 是任务启动时的不可变输入，不依赖模板之后是否仍存在。
 
 清空采用替换语义：Host 先重置该会议的 ASR、音频与说话人状态并解除活动会议，再删除旧会议，创建带新 ID 的空白会议；标题、元数据和生成文件版本保留，segments、speakers 与 vocabulary 清空。新 ID 配合 epoch/会话校验，防止在途 final 请求把旧文本写回。
 
@@ -186,13 +198,15 @@ Word 生成路径只有用户点击后的 `POST /meetings/:id/generate` 会进�
 ```text
 术语纠正后的展示逐字稿 + segmentId + 说话人 + 用户元数据
        ↓
+读取并验证 minutesTemplateId 对应的本地模板字节，固定任务快照
+       ↓
 MeetScribe 显式纪要模型；minutesModel=null 时读取 DSH 默认选择
        ↓
 Harness llm.stream（无响应看门狗 + 流式 text-delta 收集）
        ↓
 JSON 提取 + 严格 schema 校验
        ↓
-docx 原生 OOXML 渲染
+docx 原生 OOXML 渲染；有快照时合并自定义模板样式、编号和正文
        ↓
 版本化文件名 + Meeting.generatedFiles
 ```
@@ -205,7 +219,15 @@ docx 原生 OOXML 渲染
 
 `llm.ts` 收集 `text-delta`，按 block index 防止 `block-end` 重复追加，并支持只有 assembled block 的适配器；reasoning 只计数，不混入正文。显式 `minutesModel` 优先，只有 null 才调用 `agentDefaultModel.currentSelection()`。请求使用可重置的 `AbortController` 看门狗：每个流事件都重置无响应计时，不再使用 `AbortSignal.timeout(120000)` 作为总期限；超时后中止请求并报告实际无响应时长。除迭代异常外，还处理 Harness 规范化的 `finish.reason.kind=error|aborted`，透传实际 failure code/message，并对 NO_ADAPTER 和 UNSUPPORTED_REASONING_EFFORT 指出设置修复入口。只有正常终态且确实没有正文时才区分 reasoning-only、输出长度上限或空流，不再统一报“空内容”。诊断日志只记录事件计数、reasoning 字符数和 finish kind，不记录会议或模型正文。
 
-`src/word/document.ts` 使用 A4、中文字体、固定 DXA 列宽、真实 numbering、页码和重复表头。输出不经过 Markdown。当前一次性发送整场会议；长会议的分块和层级总结属于后续工作。
+`src/word/document.ts` 使用 A4、黑白灰正式版式、中文字体、固定 DXA 列宽、真实 numbering、页码和重复表头。输出不经过 Markdown。当前一次性发送整场会议；长会议的分块和层级总结属于后续工作。
+
+`src/word/template.ts` 使用 `fflate` 在内存中解包和重打包 DOCX，并用 `fast-xml-parser` 校验 XML。上传时检查中央目录、条目数、解压总量、路径、宏/OLE/可执行内容，以及包内所有 XML/RELS 中的 DOCTYPE、外部关系、动态外部字段和嵌入内容。应用模板时，唯一 `{{MEETSCRIBE_BODY}}` 段落被替换为 `buildMinutesDocx(..., { bodyOnly: true })` 片段；模板自己的 `sectPr`、页眉和页脚保留，正文样式改名合并且编号 ID 重映射。元数据标记在正文及页眉页脚替换。模板不发送给 LLM，也不写入任意用户路径。
+
+### DSH 内置 Office 预览
+
+`src/host/document-preview.ts` 直接调用 Harness Host `officeKit.convert()`，输入 `extension:'docx'`、`priority:'foreground'` 和授权后的 `OfficeKitSource.read()`。这是 Harness 内建 Office 预览相同的转换边界，但不需要 MeetScribe 独立页面挂载 Session，也不写 Session 事件。
+
+转换前用 `lstat/stat` 检查普通文件、符号链接和 50 MB 上限；读取后再次核对大小与 mtime 版本，预览期间发生变化则拒绝。PDF 响应使用 `content-type: application/pdf`、`content-disposition: inline`、`private, no-store` 和 `nosniff`。原样 DOCX attachment 路由已经移除，因此“打开”不是隐藏的下载换名。
 
 ## 7. 全局热键
 

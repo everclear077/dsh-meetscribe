@@ -1,8 +1,8 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { collectMinutesDocuments, queryMinutesDocuments, type MinutesSort } from '../shared/documents.ts'
 import type { MinutesTask, MinutesTaskStage } from '../shared/types.ts'
-import { api } from './api.ts'
 import { Icon, Mark } from './components.tsx'
+import { DocumentPreview, type DocumentPreviewTarget } from './document-preview.tsx'
 import { meetings, useMeetings } from './meeting-controller.ts'
 import { MeetingSettings } from './settings.tsx'
 
@@ -28,7 +28,7 @@ function modelProgressLabel(task: MinutesTask): string {
   return '已发送完整逐字稿，正在等待所选纪要模型响应'
 }
 
-function GenerationTask({ task }: { task: MinutesTask }): ReactNode {
+function GenerationTask({ task, onOpen }: { task: MinutesTask; onOpen: (target: DocumentPreviewTarget) => void }): ReactNode {
   const currentStep = task.stage === 'completed' ? taskSteps.length : taskSteps.findIndex((step) => step.id === task.stage)
   return <article className={`ms-generation-task is-${task.status}`}>
     <div className="ms-generation-task-heading">
@@ -41,7 +41,7 @@ function GenerationTask({ task }: { task: MinutesTask }): ReactNode {
     </ol>
     {task.status === 'running' && task.stage === 'model' && <small className="ms-generation-detail">{modelProgressLabel(task)}</small>}
     {task.status === 'failed' && <div className="ms-generation-error" role="alert"><span>{task.error}</span><button className="ms-action" onClick={() => void meetings.generate(task.meetingId)}>重试生成</button></div>}
-    {task.status === 'completed' && task.version !== undefined && <a className="ms-action" href={api.documentUrl(task.meetingId, task.version)} download><Icon name="download" />下载 Word</a>}
+    {task.status === 'completed' && task.version !== undefined && <button type="button" className="ms-action" onClick={() => onOpen({ meetingId: task.meetingId, version: task.version!, fileName: `${task.meetingTitle}-纪要-v${task.version}.docx` })}><Icon name="file" />在 DSH 中打开</button>}
   </article>
 }
 
@@ -51,6 +51,7 @@ export function MeetScribeWorkspace({ initialView = 'documents' }: { initialView
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<MinutesSort>('created-desc')
   const [refreshing, setRefreshing] = useState(false)
+  const [preview, setPreview] = useState<DocumentPreviewTarget | null>(null)
   const documents = useMemo(() => collectMinutesDocuments(state.meetings), [state.meetings])
   const visibleDocuments = useMemo(() => queryMinutesDocuments(documents, query, sort), [documents, query, sort])
   const visibleTasks = useMemo(() => [...state.minutesTasks].sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running') || b.updatedAt.localeCompare(a.updatedAt)), [state.minutesTasks])
@@ -87,7 +88,7 @@ export function MeetScribeWorkspace({ initialView = 'documents' }: { initialView
         {state.error && <div className="ms-error" role="alert">{state.error}</div>}
         {visibleTasks.length > 0 && <section className="ms-generation-tasks" aria-labelledby="ms-generation-tasks-title">
           <div className="ms-generation-tasks-heading"><h2 id="ms-generation-tasks-title">生成任务</h2><span>{runningTasks > 0 ? `${runningTasks} 个进行中` : '最近任务'}</span></div>
-          <div className="ms-generation-task-list">{visibleTasks.map((task) => <GenerationTask task={task} key={task.id} />)}</div>
+          <div className="ms-generation-task-list">{visibleTasks.map((task) => <GenerationTask task={task} onOpen={setPreview} key={task.id} />)}</div>
         </section>}
         <div className="ms-document-list">
           {visibleDocuments.length > 0 && <div className="ms-document-list-head" aria-hidden="true"><span>文件</span><span>版本</span><span>生成时间</span><span>操作</span></div>}
@@ -96,12 +97,13 @@ export function MeetScribeWorkspace({ initialView = 'documents' }: { initialView
               <div className="ms-document-name"><span className="ms-file-icon" aria-hidden="true">W</span><span><strong title={document.path}>{document.fileName}</strong><small>{document.meetingTitle}</small></span></div>
               <span className="ms-document-version">第 {document.version} 版</span>
               <time className="ms-document-time" dateTime={document.createdAt}>{documentTime(document.createdAt)}</time>
-              <a className="ms-action ms-document-download" href={api.documentUrl(document.meetingId, document.version)} download={document.fileName} aria-label={`下载 ${document.fileName}`}><Icon name="download" /><span>下载</span></a>
+              <button type="button" className="ms-action ms-document-open" onClick={() => setPreview({ meetingId: document.meetingId, version: document.version, fileName: document.fileName })} aria-label={`在 DSH 中打开 ${document.fileName}`}><Icon name="file" /><span>打开</span></button>
             </li>)}
           </ul>}
         </div>
         <footer className="ms-documents-footer">{query ? `当前显示 ${visibleDocuments.length} / ${documents.length} 个文件` : `共 ${documents.length} 个文件`}<span>音频不发送给大模型；生成 Word 或主动发送会议草稿时才发送文本。</span></footer>
       </section>
     </main>}
+    {preview && <DocumentPreview target={preview} onClose={() => setPreview(null)} />}
   </div>
 }
