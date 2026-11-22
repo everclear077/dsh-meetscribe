@@ -1,10 +1,24 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { DEFAULT_SETTINGS, type MeetScribeSettings } from '../shared/types.ts'
+import { DEFAULT_SETTINGS, type MeetScribeSettings, type MinutesModelSelection } from '../shared/types.ts'
 import { normalizeAsrReplacements } from '../shared/vocabulary.ts'
 
 export function defaultOutputDirectory(): string {
   return join(process.env.USERPROFILE || process.env.HOME || '.', 'Documents', 'MeetScribe')
+}
+
+function normalizeMinutesModel(input: unknown): MinutesModelSelection | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+  const value = input as Record<string, unknown>
+  const provider = typeof value.provider === 'string' ? value.provider.trim() : ''
+  const model = typeof value.model === 'string' ? value.model.trim() : ''
+  if (!provider || !model || provider.length > 128 || model.length > 256) return null
+  const reasoningEffort = typeof value.reasoningEffort === 'string' ? value.reasoningEffort.trim() : ''
+  return {
+    provider,
+    model,
+    ...reasoningEffort && reasoningEffort.length <= 128 ? { reasoningEffort } : {},
+  }
 }
 
 export function normalizeSettings(input: unknown): MeetScribeSettings {
@@ -21,6 +35,8 @@ export function normalizeSettings(input: unknown): MeetScribeSettings {
     preloadModels: typeof value.preloadModels === 'boolean' ? value.preloadModels : DEFAULT_SETTINGS.preloadModels,
     outputDir: typeof value.outputDir === 'string' && value.outputDir.trim() ? value.outputDir.trim() : defaultOutputDirectory(),
     asrReplacements: normalizeAsrReplacements(value.asrReplacements),
+    minutesModel: normalizeMinutesModel(value.minutesModel),
+    minutesIdleTimeoutMs: Math.round(clampNumber(value.minutesIdleTimeoutMs, 60000, 1800000, DEFAULT_SETTINGS.minutesIdleTimeoutMs)),
   }
 }
 

@@ -88,6 +88,8 @@ export class SpeakerIdentifier {
     if (!cluster) {
       cluster = new SpeakerClusterer(threshold, maxSpeakers)
       this.clusters.set(meetingId, cluster)
+    } else {
+      cluster.configure(threshold, maxSpeakers)
     }
     let sequence = cluster.size + 1
     const result = cluster.add(embedding, () => `speaker-${sequence++}`)

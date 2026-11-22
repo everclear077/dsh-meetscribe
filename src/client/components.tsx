@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 
-export function Icon({ name }: { name: 'expand' | 'collapse' | 'close' | 'pause' | 'play' | 'clear' | 'file' | 'more' | 'minimize' | 'restore' | 'folder' | 'search' | 'settings' | 'download' | 'refresh' }): ReactNode {
+export function Icon({ name }: { name: 'expand' | 'collapse' | 'close' | 'pause' | 'play' | 'clear' | 'file' | 'more' | 'minimize' | 'restore' | 'folder' | 'search' | 'settings' | 'download' | 'refresh' | 'chat' }): ReactNode {
   const paths = {
     expand: <><path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5" /></>,
     collapse: <><path d="M3 8h5V3M21 8h-5V3M8 21v-5H3M16 21v-5h5" /></>,
@@ -17,6 +17,7 @@ export function Icon({ name }: { name: 'expand' | 'collapse' | 'close' | 'pause'
     settings: <><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></>,
     download: <><path d="M12 3v12m-5-5 5 5 5-5M4 20h16" /></>,
     refresh: <><path d="M20 7v5h-5M4 17v-5h5" /><path d="M6.1 8a7 7 0 0 1 11.8-1L20 12M4 12l2.1 5a7 7 0 0 0 11.8-1" /></>,
+    chat: <><path d="M4 4h16v12H9l-5 4z" /><path d="M8 8h8M8 12h5" /></>,
   }
   return <svg viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>
 }

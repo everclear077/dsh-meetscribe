@@ -1,6 +1,6 @@
 {
   "name": "dsh-meetscribe",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Local-first meeting transcription, speaker management, searchable Word minutes and a document workspace for DeepSeek Harness.",
   "type": "module",
   "main": "lib/index.js",
@@ -54,6 +54,7 @@
       "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-workspace",
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-sidebar-right",
         "@deepseek-ai/dsh-client-shortcuts"

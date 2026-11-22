@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import type { Meeting, MeetingMetadata } from '../shared/types.ts'
+import type { Meeting, MeetingMetadata, MinutesTask } from '../shared/types.ts'
 import { createAsrEngine, type AsrEngine } from './asr.ts'
 import { acquireMeetingAudio, releaseMeetingAudio } from './audio.ts'
 import { api } from './api.ts'
@@ -11,6 +11,7 @@ export interface MeetingState {
   expanded: boolean
   tab: 'transcript' | 'details' | 'files' | 'history'
   meetings: Meeting[]
+  minutesTasks: MinutesTask[]
   current: Meeting | null
   pending: string
   audioLevel: number
@@ -22,7 +23,7 @@ export interface MeetingState {
 }
 
 const initial: MeetingState = {
-  ready: false, open: false, minimized: false, expanded: false, tab: 'transcript', meetings: [], current: null,
+  ready: false, open: false, minimized: false, expanded: false, tab: 'transcript', meetings: [], minutesTasks: [], current: null,
   pending: '', audioLevel: 0, busy: false, generating: false, error: '', notice: '', elapsed: 0,
 }
 
@@ -35,6 +36,40 @@ class MeetingController {
   private runSince = 0
   private accumulated = 0
   private lastLevelAt = 0
+  private conversationHandoff: ((prompt: string) => void) | null = null
+  private readonly generationRequests = new Set<string>()
+
+  private generatingFor(meetingId: string | undefined, tasks = this.state.minutesTasks): boolean {
+    return !!meetingId && (this.generationRequests.has(meetingId) || tasks.some((task) => task.meetingId === meetingId && task.status === 'running'))
+  }
+
+  private applyMinutesTask(task: MinutesTask): void {
+    const previous = this.state.minutesTasks.find((item) => item.id === task.id)
+    if (previous && (previous.updatedAt > task.updatedAt || (previous.status !== 'running' && task.status === 'running') || (previous.updatedAt === task.updatedAt && previous.progress > task.progress))) return
+    const minutesTasks = [task, ...this.state.minutesTasks.filter((item) => item.id !== task.id && !(task.status === 'running' && item.meetingId === task.meetingId && item.status === 'failed'))]
+    const isCurrent = this.state.current?.id === task.meetingId
+    const patch: Partial<MeetingState> = {
+      minutesTasks,
+      generating: this.generatingFor(this.state.current?.id, minutesTasks),
+    }
+    if (isCurrent && task.status === 'failed') {
+      patch.error = task.error || '纪要生成失败，请重试'
+    }
+    if (isCurrent && task.status === 'completed') {
+      patch.error = ''
+      patch.notice = `Word 会议纪要第 ${task.version ?? ''} 版已生成`
+      if (this.state.open) {
+        patch.tab = 'files'
+        patch.expanded = true
+        patch.minimized = false
+      }
+    }
+    this.patch(patch)
+  }
+
+  setConversationHandoff = (handler: ((prompt: string) => void) | null): void => {
+    this.conversationHandoff = handler
+  }
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
@@ -46,7 +81,7 @@ class MeetingController {
     this.listeners.forEach((listener) => listener())
   }
   private fail(error: unknown): void {
-    this.patch({ busy: false, generating: false, error: error instanceof Error ? error.message : String(error) })
+    this.patch({ busy: false, generating: this.generatingFor(this.state.current?.id), error: error instanceof Error ? error.message : String(error) })
   }
   private elapsed(): number { return this.accumulated + (this.runSince ? Date.now() - this.runSince : 0) }
   private clock(on: boolean): void {
@@ -57,26 +92,35 @@ class MeetingController {
   async init(): Promise<void> {
     if (this.events) return
     try {
-      const meetings = await api.meetings()
+      const [meetings, minutesTasks] = await Promise.all([api.meetings(), api.minutesTasks()])
       const current = meetings[0] ? await api.meeting(meetings[0].id) : null
-      this.patch({ meetings, current, ready: true })
+      this.patch({ meetings, minutesTasks, current, generating: this.generatingFor(current?.id, minutesTasks), ready: true })
       this.events = new EventSource('/meetscribe/events')
       this.events.addEventListener('meeting', (event) => {
         const meeting = JSON.parse((event as MessageEvent).data) as Meeting
         const meetings = [meeting, ...this.state.meetings.filter((item) => item.id !== meeting.id)]
         this.patch({ meetings, current: this.state.current?.id === meeting.id ? meeting : this.state.current })
       })
+      this.events.addEventListener('minutes-task', (event) => {
+        this.applyMinutesTask(JSON.parse((event as MessageEvent).data) as MinutesTask)
+      })
+      this.events.addEventListener('minutes-tasks-removed', (event) => {
+        const { meetingId } = JSON.parse((event as MessageEvent).data) as { meetingId?: string }
+        const minutesTasks = this.state.minutesTasks.filter((task) => meetingId ? task.meetingId !== meetingId : false)
+        this.patch({ minutesTasks, generating: this.generatingFor(this.state.current?.id, minutesTasks) })
+      })
       this.events.addEventListener('meeting-deleted', (event) => {
         const { id } = JSON.parse((event as MessageEvent).data) as { id: string }
-        this.patch({ meetings: this.state.meetings.filter((item) => item.id !== id), current: this.state.current?.id === id ? null : this.state.current })
+        const minutesTasks = this.state.minutesTasks.filter((task) => task.meetingId !== id)
+        this.patch({ meetings: this.state.meetings.filter((item) => item.id !== id), minutesTasks, current: this.state.current?.id === id ? null : this.state.current, generating: this.generatingFor(this.state.current?.id, minutesTasks) })
       })
     } catch (error) { this.fail(error); this.patch({ ready: true }) }
   }
 
   refresh = async (): Promise<void> => {
     try {
-      const list = await api.meetings()
-      this.patch({ meetings: list, ready: true, error: '' })
+      const [list, minutesTasks] = await Promise.all([api.meetings(), api.minutesTasks()])
+      this.patch({ meetings: list, minutesTasks, generating: this.generatingFor(this.state.current?.id, minutesTasks), ready: true, error: '' })
     } catch (error) { this.fail(error) }
   }
 
@@ -100,13 +144,16 @@ class MeetingController {
 
   select = async (id: string): Promise<void> => {
     if (this.engine) { this.patch({ error: '请先结束当前录音，再切换会议' }); return }
-    try { this.patch({ current: await api.meeting(id), tab: 'transcript', error: '', elapsed: 0 }) } catch (error) { this.fail(error) }
+    try {
+      const current = await api.meeting(id)
+      this.patch({ current, generating: this.generatingFor(id), tab: 'transcript', error: '', elapsed: 0 })
+    } catch (error) { this.fail(error) }
   }
   create = async (): Promise<void> => {
     if (this.engine) return
     try {
       const meeting = await api.create()
-      this.patch({ current: meeting, meetings: [meeting, ...this.state.meetings], tab: 'transcript', elapsed: 0, notice: '已新建会议' })
+      this.patch({ current: meeting, meetings: [meeting, ...this.state.meetings], generating: false, tab: 'transcript', elapsed: 0, notice: '已新建会议' })
     } catch (error) { this.fail(error) }
   }
 
@@ -124,7 +171,7 @@ class MeetingController {
       this.runSince = Date.now()
       const settings = await api.settings()
       const engine = createAsrEngine({
-        basePath: '/meetscribe', silenceMs: settings.silenceMs, mode: 'toggle', bargeInMode: 'auto', audioSource: 'microphone',
+        basePath: '/meetscribe', silenceMs: settings.silenceMs, segmentation: 'vad', mode: 'toggle', bargeInMode: 'auto', audioSource: 'microphone',
         acquireAudio: () => acquireMeetingAudio('microphone'),
         releaseAudio: releaseMeetingAudio,
       }, meeting.id)
@@ -191,6 +238,10 @@ class MeetingController {
   clear = async (): Promise<void> => {
     const meeting = this.state.current
     if (!meeting || this.state.busy) return
+    if (this.generatingFor(meeting.id)) {
+      this.patch({ error: '该会议的纪要正在生成，请完成后再清空逐字稿' })
+      return
+    }
     const wasRecording = !!this.engine || meeting.status === 'recording'
     this.patch({ busy: true, error: '', notice: '' })
     try {
@@ -200,9 +251,12 @@ class MeetingController {
       this.runSince = 0
       this.clock(false)
       const cleared = await api.clear(meeting.id)
+      const minutesTasks = this.state.minutesTasks.filter((task) => task.meetingId !== meeting.id)
       this.patch({
         current: cleared,
         meetings: [cleared, ...this.state.meetings.filter((item) => item.id !== meeting.id && item.id !== cleared.id)],
+        minutesTasks,
+        generating: false,
         busy: false,
         pending: '',
         audioLevel: 0,
@@ -215,6 +269,10 @@ class MeetingController {
 
   clearHistory = async (): Promise<void> => {
     if (this.state.busy) return
+    if (this.state.minutesTasks.some((task) => task.status === 'running')) {
+      this.patch({ error: '有会议纪要正在生成，请完成后再清空历史' })
+      return
+    }
     const wasRecording = !!this.engine || this.state.current?.status === 'recording'
     this.patch({ busy: true, error: '', notice: '' })
     try {
@@ -227,6 +285,8 @@ class MeetingController {
       this.patch({
         current: null,
         meetings: [],
+        minutesTasks: [],
+        generating: false,
         busy: false,
         pending: '',
         audioLevel: 0,
@@ -261,13 +321,32 @@ class MeetingController {
     if (!this.state.current) return
     try { this.patch({ current: await api.update(this.state.current.id, { title, metadata }), notice: '会议信息已保存' }) } catch (error) { this.fail(error) }
   }
-  generate = async (): Promise<void> => {
-    if (!this.state.current || this.state.generating) return
+  generate = async (meetingId?: string): Promise<void> => {
+    const id = meetingId ?? this.state.current?.id
+    if (!id || this.generatingFor(id)) return
     if (this.engine) { this.patch({ error: '请先暂停录音，再生成会议纪要' }); return }
-    this.patch({ generating: true, error: '', notice: '' })
+    this.generationRequests.add(id)
+    this.patch({ generating: this.generatingFor(this.state.current?.id), error: '', notice: '' })
     try {
-      const meeting = await api.generate(this.state.current.id)
-      this.patch({ current: meeting, generating: false, tab: 'files', expanded: true, minimized: false, notice: 'Word 会议纪要已生成' })
+      const task = await api.generate(id)
+      this.applyMinutesTask(task)
+      this.patch({ notice: '生成任务已开始，可在左侧 MeetScribe 工作台查看完整进度' })
+    } catch (error) { this.fail(error) }
+    finally {
+      this.generationRequests.delete(id)
+      this.patch({ generating: this.generatingFor(this.state.current?.id) })
+    }
+  }
+  openInConversation = async (): Promise<void> => {
+    const current = this.state.current
+    if (!current || this.state.busy) return
+    if (this.engine) { this.patch({ error: '请先暂停录音，再在 DSH 对话中整理' }); return }
+    if (!this.conversationHandoff) { this.patch({ error: '当前 DSH 版本没有可用的对话输入服务' }); return }
+    this.patch({ busy: true, error: '', notice: '' })
+    try {
+      const { prompt } = await api.conversationPrompt(current.id)
+      this.conversationHandoff(prompt)
+      this.patch({ busy: false, open: false, minimized: false, notice: '完整会议内容已放入 DSH 对话输入框，请检查后发送' })
     } catch (error) { this.fail(error) }
   }
   dispose(): void {

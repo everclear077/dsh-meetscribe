@@ -17,11 +17,11 @@ test('speaker clusters update centroids and respect maximum speakers', () => {
   assert.ok(cosineSimilarity(new Float32Array([1, 0]), new Float32Array([1, 0])) > 0.99)
 })
 
-test('short same-speaker drift does not create a label at the default threshold', () => {
+test('short same-speaker drift remains merged at an explicitly lower threshold', () => {
   // Real ERes2NetV2 diagnostic: a 0.8 s clip from the same voice scored 0.577.
   const sameVoice = new Float32Array([0.577, Math.sqrt(1 - 0.577 ** 2)])
   const differentVoice = new Float32Array([0.331, Math.sqrt(1 - 0.331 ** 2)])
-  const cluster = new SpeakerClusterer()
+  const cluster = new SpeakerClusterer(0.56)
   let sequence = 0
   const id = () => `speaker-${++sequence}`
   assert.equal(cluster.add(new Float32Array([1, 0]), id).speakerId, 'speaker-1')
@@ -40,6 +40,43 @@ test('short same-speaker drift does not create a label at the default threshold'
   const previousId = () => `speaker-${++previousSequence}`
   previous.add(new Float32Array([1, 0]), previousId)
   assert.equal(previous.add(sameVoice, previousId).speakerId, 'speaker-2')
+})
+
+test('default threshold separates the reproduced two-voice boundary sample', () => {
+  // Synthetic Huihui/Zira regression: the first different-voice clip scored 0.6339
+  // against the established voice and was merged by every threshold through 0.60.
+  const differentVoice = new Float32Array([0.6339, Math.sqrt(1 - 0.6339 ** 2)])
+  const cluster = new SpeakerClusterer()
+  let sequence = 0
+  const id = () => `speaker-${++sequence}`
+  cluster.add(new Float32Array([1, 0]), id)
+  const result = cluster.add(differentVoice, id)
+  assert.equal(result.speakerId, 'speaker-2')
+  assert.equal(result.isNew, true)
+})
+
+test('borderline matches cannot contaminate a centroid and merge later voices', () => {
+  const vector = (similarity) => new Float32Array([similarity, Math.sqrt(1 - similarity ** 2)])
+  const cluster = new SpeakerClusterer(0.62, 8)
+  let sequence = 0
+  const id = () => `speaker-${++sequence}`
+  cluster.add(vector(1), id)
+  // This first boundary sample is still labeled as the existing speaker, but it
+  // must not shift the centroid. The next different-voice sample scored 0.5671.
+  assert.equal(cluster.add(vector(0.6339), id).speakerId, 'speaker-1')
+  assert.equal(cluster.add(vector(0.5671), id).speakerId, 'speaker-2')
+  assert.equal(cluster.size, 2)
+})
+
+test('meeting clusters apply changed settings without losing voice history', () => {
+  const cluster = new SpeakerClusterer(0.5, 2)
+  let sequence = 0
+  const id = () => `speaker-${++sequence}`
+  cluster.add(new Float32Array([1, 0]), id)
+  cluster.configure(0.65, 4)
+  const result = cluster.add(new Float32Array([0.6, 0.8]), id)
+  assert.equal(result.speakerId, 'speaker-2')
+  assert.equal(result.isNew, true)
 })
 
 test('minutes document library collects versions, searches and sorts deterministically', () => {
@@ -169,14 +206,24 @@ test('settings are validated and persisted', async (t) => {
   const store = new SettingsStore(join(directory, 'settings.json'))
   await store.init()
   assert.equal(store.get().silenceMs, 800)
-  assert.equal(store.get().speakerThreshold, 0.56)
+  assert.equal(store.get().speakerThreshold, 0.65)
   assert.deepEqual(store.get().asrReplacements, [])
-  const value = await store.save({ speakerThreshold: 99, maxSpeakers: -2, silenceMs: 20, asrReplacements: [{ to: 'OKR', from: ['欧凯尔', '欧 k 尔'] }] })
+  assert.equal(store.get().minutesModel, null)
+  assert.equal(store.get().minutesIdleTimeoutMs, 300000)
+  const value = await store.save({ speakerThreshold: 99, maxSpeakers: -2, silenceMs: 20, minutesIdleTimeoutMs: 99999999, minutesModel: { provider: ' synthetic ', model: ' minutes-model ', reasoningEffort: 'deep', apiKey: 'must-not-persist' }, asrReplacements: [{ to: 'OKR', from: ['欧凯尔', '欧 k 尔'] }] })
   assert.ok(value.speakerThreshold <= 0.9)
   assert.ok(value.maxSpeakers >= 1)
   assert.ok(value.silenceMs >= 300)
+  assert.equal(value.minutesIdleTimeoutMs, 1800000)
+  assert.deepEqual(value.minutesModel, { provider: 'synthetic', model: 'minutes-model', reasoningEffort: 'deep' })
+  assert.equal('apiKey' in value.minutesModel, false)
   const reloaded = new SettingsStore(join(directory, 'settings.json'))
   await reloaded.init()
   assert.equal(reloaded.get().silenceMs, value.silenceMs)
+  assert.deepEqual(reloaded.get().minutesModel, value.minutesModel)
+  assert.equal(reloaded.get().minutesIdleTimeoutMs, 1800000)
   assert.deepEqual(reloaded.get().asrReplacements, [{ to: 'OKR', from: ['欧凯尔', '欧 k 尔'] }])
+  const reset = await reloaded.save({ minutesModel: null, minutesIdleTimeoutMs: 0 })
+  assert.equal(reset.minutesModel, null)
+  assert.equal(reset.minutesIdleTimeoutMs, 60000)
 })
