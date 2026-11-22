@@ -24,34 +24,35 @@ import {
 } from "docx";
 import type { MeetingMinutes } from "./types.js";
 
-const NAVY = "17365D";
-const TEAL = "168C8C";
-const TEXT = "263442";
-const MUTED = "64748B";
-const BORDER = "D6E2E8";
-const PALE_TEAL = "EAF4F4";
-const PALE_BLUE = "F4F7FA";
+const NAVY = "202020";
+const TEAL = "404040";
+const TEXT = "202020";
+const MUTED = "666666";
+const BORDER = "A6A6A6";
+const PALE_TEAL = "F2F2F2";
+const PALE_BLUE = "FAFAFA";
 const WHITE = "FFFFFF";
 
 const BODY_FONT = {
-  ascii: "Calibri",
-  hAnsi: "Calibri",
-  eastAsia: "SimSun",
+  ascii: "Times New Roman",
+  hAnsi: "Times New Roman",
+  eastAsia: "FangSong",
 } as const;
 const HEADING_FONT = {
-  ascii: "Aptos Display",
-  hAnsi: "Aptos Display",
-  eastAsia: "Microsoft YaHei",
+  ascii: "Arial",
+  hAnsi: "Arial",
+  eastAsia: "SimHei",
 } as const;
 
 const PAGE_WIDTH = 11906;
 const PAGE_HEIGHT = 16838;
-const PAGE_MARGIN = 1276;
+const PAGE_MARGIN = 1587;
 const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
-const INFO_WIDTHS = [1250, 3427, 1250, 3427] as const;
-const ACTION_WIDTHS = [520, 2890, 1000, 1180, 1150, 900, 1714] as const;
+const INFO_WIDTHS = [1300, 3066, 1300, 3066] as const;
+const ACTION_WIDTHS = [520, 3300, 1000, 1100, 1600, 1212] as const;
 const NEXT_MEETING_WIDTHS = [1500, CONTENT_WIDTH - 1500] as const;
 const BULLET_LIST = "minutes-bullets";
+const AGENDA_LIST = "minutes-agenda";
 const DECISION_LIST = "minutes-decisions";
 
 function inlineText(value: unknown): string {
@@ -84,12 +85,12 @@ function bodyParagraph(
     alignment: options.alignment ?? AlignmentType.JUSTIFIED,
     numbering: options.numbering,
     indent: options.indent,
-    spacing: { after: 120, line: 340, lineRule: LineRuleType.AUTO },
+    spacing: { after: 120, line: 560, lineRule: LineRuleType.EXACT },
     children: [
       new TextRun({
         text: inlineText(text),
         font: BODY_FONT,
-        size: 21,
+        size: 24,
         color: options.color ?? TEXT,
       }),
     ],
@@ -102,7 +103,7 @@ function sectionHeading(title: string, index: number): Paragraph {
   return new Paragraph({
     heading: HeadingLevel.HEADING_1,
     border: {
-      bottom: { style: BorderStyle.SINGLE, size: 6, color: BORDER, space: 5 },
+      bottom: { style: BorderStyle.SINGLE, size: 4, color: BORDER, space: 4 },
     },
     children: [new TextRun({ text: `${prefix}、${title}`, font: HEADING_FONT })],
   });
@@ -227,15 +228,15 @@ function buildInfoTable(data: MeetingMinutes): Table {
 }
 
 function buildActionTable(data: MeetingMinutes): Table {
-  const headers = ["序号", "工作事项", "负责人", "协同人", "完成时限", "状态", "备注"];
+  const headers = ["序号", "工作事项及交付要求", "负责人", "协同人", "完成时限", "状态"];
   const headerRow = new TableRow({
     tableHeader: true,
     cantSplit: true,
     children: headers.map((header, index) =>
       tableCell(header, ACTION_WIDTHS[index], {
         bold: true,
-        color: WHITE,
-        fill: NAVY,
+        color: TEXT,
+        fill: PALE_TEAL,
         align: AlignmentType.CENTER,
       }),
     ),
@@ -244,24 +245,42 @@ function buildActionTable(data: MeetingMinutes): Table {
   const rows = data.actionItems
     .filter((item) => inlineText(item.task))
     .map((item, index) => {
+      const task = inlineText(item.task);
+      const notes = inlineText(item.notes);
+      const taskCell = new TableCell({
+        width: { size: ACTION_WIDTHS[1], type: WidthType.DXA },
+        verticalAlign: VerticalAlign.CENTER,
+        shading: index % 2 === 1 ? { type: ShadingType.CLEAR, color: "auto", fill: PALE_BLUE } : undefined,
+        margins: { top: 100, bottom: 100, left: 120, right: 120 },
+        children: [
+          new Paragraph({
+            spacing: { after: notes ? 60 : 0, line: 300, lineRule: LineRuleType.AUTO },
+            children: [new TextRun({ text: task, font: BODY_FONT, size: 20, color: TEXT })],
+          }),
+          ...(notes ? [new Paragraph({
+            spacing: { after: 0, line: 280, lineRule: LineRuleType.AUTO },
+            children: [new TextRun({ text: `交付说明：${notes}`, font: BODY_FONT, size: 18, color: MUTED })],
+          })] : []),
+        ],
+      });
       const values = [
         String(index + 1),
-        inlineText(item.task),
         confirmationText(item.owner),
         item.collaborators?.map(inlineText).filter(Boolean).join("、") || "—",
         confirmationText(item.due),
         confirmationText(item.status),
-        inlineText(item.notes) || "—",
       ];
+      const columns = [0, 2, 3, 4, 5];
       return new TableRow({
         cantSplit: true,
-        children: values.map((value, column) =>
-          tableCell(value, ACTION_WIDTHS[column], {
+        children: [
+          tableCell(values[0], ACTION_WIDTHS[0], { fill: index % 2 === 1 ? PALE_BLUE : undefined, align: AlignmentType.CENTER }),
+          taskCell,
+          ...values.slice(1).map((value, position) => tableCell(value, ACTION_WIDTHS[columns[position + 1]], {
             fill: index % 2 === 1 ? PALE_BLUE : undefined,
-            align:
-              column === 1 || column === 6 ? AlignmentType.START : AlignmentType.CENTER,
-          }),
-        ),
+            align: AlignmentType.CENTER,
+          })),
+        ],
       });
     });
 
@@ -307,7 +326,12 @@ function buildNextMeetingTable(data: MeetingMinutes): Table {
   });
 }
 
-export function createMinutesDocument(data: MeetingMinutes): Document {
+export interface MinutesDocumentOptions {
+  /** Custom templates provide their own title and metadata placeholders. */
+  bodyOnly?: boolean;
+}
+
+export function createMinutesDocument(data: MeetingMinutes, options: MinutesDocumentOptions = {}): Document {
   const metadata = data.metadata;
   const title = minutesTitle(metadata.name);
   const agenda = (data.agenda ?? []).map(inlineText).filter(Boolean);
@@ -322,13 +346,11 @@ export function createMinutesDocument(data: MeetingMinutes): Document {
     data.nextMeeting !== undefined &&
     Object.values(data.nextMeeting).some((value) => inlineText(value));
 
-  const children: (Paragraph | Table)[] = [
+  const children: (Paragraph | Table)[] = options.bodyOnly ? [] : [
     new Paragraph({
       heading: HeadingLevel.TITLE,
       alignment: AlignmentType.CENTER,
-      border: {
-        bottom: { style: BorderStyle.SINGLE, size: 12, color: TEAL, space: 10 },
-      },
+      spacing: { after: 280 },
       children: [
         new TextRun({
           text: title,
@@ -348,14 +370,14 @@ export function createMinutesDocument(data: MeetingMinutes): Document {
       children.push(
         bodyParagraph(item, {
           alignment: AlignmentType.START,
-          numbering: { reference: BULLET_LIST, level: 0 },
+          numbering: { reference: AGENDA_LIST, level: 0 },
         }),
       );
     });
   }
 
   if (discussion.length > 0) {
-    children.push(sectionHeading("讨论主要内容", ++sectionIndex));
+    children.push(sectionHeading("讨论要点", ++sectionIndex));
     discussion.forEach((item) => {
       children.push(
         new Paragraph({
@@ -367,14 +389,14 @@ export function createMinutesDocument(data: MeetingMinutes): Document {
       children.push(
         new Paragraph({
           alignment: AlignmentType.JUSTIFIED,
-          spacing: { after: 120, line: 340, lineRule: LineRuleType.AUTO },
+          spacing: { after: 120, line: 560, lineRule: LineRuleType.EXACT },
           children: [
             ...(speaker
               ? [
                   new TextRun({
                     text: `${speaker}：`,
                     font: BODY_FONT,
-                    size: 21,
+                    size: 24,
                     bold: true,
                     color: NAVY,
                   }),
@@ -383,7 +405,7 @@ export function createMinutesDocument(data: MeetingMinutes): Document {
             new TextRun({
               text: inlineText(item.content),
               font: BODY_FONT,
-              size: 21,
+              size: 24,
               color: TEXT,
             }),
           ],
@@ -400,7 +422,7 @@ export function createMinutesDocument(data: MeetingMinutes): Document {
   }
 
   if (decisions.length > 0) {
-    children.push(sectionHeading("会议决定事项", ++sectionIndex));
+    children.push(sectionHeading("议定事项", ++sectionIndex));
     decisions.forEach((item) => {
       children.push(
         bodyParagraph(item.content, {
@@ -411,12 +433,12 @@ export function createMinutesDocument(data: MeetingMinutes): Document {
   }
 
   if (actionItems.length > 0) {
-    children.push(sectionHeading("任务分工及完成时限", ++sectionIndex));
+    children.push(sectionHeading("任务分工", ++sectionIndex));
     children.push(buildActionTable({ ...data, actionItems }));
   }
 
   if (openIssues.length > 0) {
-    children.push(sectionHeading("尚未解决的问题", ++sectionIndex));
+    children.push(sectionHeading("待核实事项", ++sectionIndex));
     openIssues.forEach((item) => {
       children.push(
         bodyParagraph(item.issue, {
@@ -440,39 +462,52 @@ export function createMinutesDocument(data: MeetingMinutes): Document {
     children.push(buildNextMeetingTable(data));
   }
 
+  if (!options.bodyOnly) {
+    children.push(new Paragraph({
+      alignment: AlignmentType.END,
+      spacing: { before: 420, after: 0, line: 360, lineRule: LineRuleType.AUTO },
+      children: [new TextRun({
+        text: `整理：${metadataText(metadata.recorder)}    审核确认：________________`,
+        font: BODY_FONT,
+        size: 20,
+        color: MUTED,
+      })],
+    }));
+  }
+
   return new Document({
     creator: "dsh-meetscribe",
     title,
     subject: metadataText(metadata.topic),
-    description: "由 dsh-meetscribe 生成的结构化会议纪要",
+    description: "会议纪要",
     keywords: "会议纪要,会议记录,dsh-meetscribe",
     features: { updateFields: true },
     styles: {
       default: {
         document: {
-          run: { font: BODY_FONT, size: 21, color: TEXT },
+          run: { font: BODY_FONT, size: 24, color: TEXT },
           paragraph: {
-            spacing: { after: 120, line: 340, lineRule: LineRuleType.AUTO },
+            spacing: { after: 120, line: 560, lineRule: LineRuleType.EXACT },
           },
         },
         title: {
-          run: { font: HEADING_FONT, size: 36, bold: true, color: NAVY },
+          run: { font: HEADING_FONT, size: 44, bold: true, color: TEXT },
           paragraph: {
-            spacing: { before: 0, after: 260 },
+            spacing: { before: 0, after: 280 },
             keepNext: true,
           },
         },
         heading1: {
-          run: { font: HEADING_FONT, size: 27, bold: true, color: NAVY },
+          run: { font: HEADING_FONT, size: 28, bold: true, color: TEXT },
           paragraph: {
-            spacing: { before: 300, after: 150 },
+            spacing: { before: 320, after: 160 },
             keepNext: true,
           },
         },
         heading2: {
-          run: { font: HEADING_FONT, size: 23, bold: true, color: TEAL },
+          run: { font: HEADING_FONT, size: 24, bold: true, color: TEXT },
           paragraph: {
-            spacing: { before: 180, after: 100 },
+            spacing: { before: 200, after: 100 },
             keepNext: true,
           },
         },
@@ -491,6 +526,21 @@ export function createMinutesDocument(data: MeetingMinutes): Document {
               style: {
                 paragraph: { indent: { left: 440, hanging: 240 } },
                 run: { font: BODY_FONT, color: TEAL },
+              },
+            },
+          ],
+        },
+        {
+          reference: AGENDA_LIST,
+          levels: [
+            {
+              level: 0,
+              format: LevelFormat.DECIMAL,
+              text: "%1.",
+              alignment: AlignmentType.START,
+              style: {
+                paragraph: { indent: { left: 460, hanging: 300 } },
+                run: { font: BODY_FONT, color: TEXT },
               },
             },
           ],
@@ -522,9 +572,9 @@ export function createMinutesDocument(data: MeetingMinutes): Document {
               orientation: PageOrientation.PORTRAIT,
             },
             margin: {
-              top: 1134,
+              top: 1701,
               right: PAGE_MARGIN,
-              bottom: 1134,
+              bottom: 1417,
               left: PAGE_MARGIN,
               header: 560,
               footer: 560,
@@ -581,19 +631,27 @@ export function createMinutesDocument(data: MeetingMinutes): Document {
   });
 }
 
-export async function buildMinutesDocx(data: MeetingMinutes): Promise<Buffer> {
-  return Packer.toBuffer(createMinutesDocument(data));
+export async function buildMinutesDocx(data: MeetingMinutes, options: MinutesDocumentOptions = {}): Promise<Buffer> {
+  return Packer.toBuffer(createMinutesDocument(data, options));
+}
+
+export interface GenerateMinutesOptions extends MinutesDocumentOptions {
+  /** Validated immutable DOCX bytes captured when the generation task starts. */
+  template?: Uint8Array;
 }
 
 export async function generateMinutesDocx(
   data: MeetingMinutes,
   outputPath: string,
+  options: GenerateMinutesOptions = {},
 ): Promise<string> {
   if (typeof outputPath !== "string" || outputPath.trim().length === 0) {
     throw new Error("输出路径不能为空。");
   }
-  const buffer = await buildMinutesDocx(data);
+  const buffer = options.template
+    ? (await import("./template.js")).applyMinutesTemplate(data, options.template)
+    : await buildMinutesDocx(data, options);
   await mkdir(dirname(resolve(outputPath)), { recursive: true });
-  await writeFile(outputPath, buffer);
+  await writeFile(outputPath, await buffer);
   return outputPath;
 }

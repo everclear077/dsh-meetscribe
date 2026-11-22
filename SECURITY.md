@@ -4,7 +4,7 @@
 
 MeetScribe 默认在本地完成音频处理、语音识别、说话人嵌入和会议持久化。音频不会发送给 LLM。
 
-只有用户明确点击“生成纪要”后，插件才会把以下文本发送到 DeepSeek Harness 当前选择的模型：
+只有用户明确点击“生成纪要”后，插件才会把以下文本发送到 MeetScribe 所选纪要模型（默认跟随 DeepSeek Harness 当前选择）：
 
 - 术语纠正后的展示逐字稿及说话人名称；
 - 用户填写的会议名称、主题、地点、主持人、记录人、参会人等元数据；
@@ -20,6 +20,7 @@ Windows 默认目录：
 %LOCALAPPDATA%\dsh-meetscribe\
 ├─ settings.json
 ├─ meetings\        # 每场会议一个 JSON，含文本和声纹嵌入
+├─ templates\      # 用户上传的 DOCX 与本地索引，不进入模型请求
 └─ models\
    ├─ asr\         # SenseVoice Small Q8 GGUF
    ├─ vad\         # Silero VAD v6.2 GGUF
@@ -49,12 +50,23 @@ Word 默认输出到 `%USERPROFILE%\Documents\MeetScribe`。
 - Host 路由只接受 loopback 请求。
 - 非 GET/HEAD 请求执行同源检查。
 - JSON 和音频请求有大小限制。
-- 文档下载只允许读取会议中已登记的生成文件。
+- 文档预览只允许读取会议中已登记的生成文件，返回 DSH Office 转换后的 inline PDF；不提供原样 DOCX attachment 下载路由，也不接收任意文件路径。
 - 模型下载请求不会上传会议文本、音频、设置或输出目录。
+- 模板上传使用原始字节并限制请求体大小；模板、会议文本、模型路由和凭据不会因为模板管理而发送到外部服务。
 
-## Word 与提示词约束
+## Word、模板与提示词约束
 
 结构化输出经过 schema 校验。提示词禁止编造参会人、负责人、期限、地点和决议；未知字段使用“待补充/待确认”。这不能替代人工复核：LLM 仍可能误归纳或漏掉约束。
+
+用户上传的 `.docx` 始终视为不可信文件：
+
+- 不上传模板，不执行宏、脚本、嵌入对象或其中声明的任何代码；不解压到可执行目录。
+- 文件最大 10 MB，ZIP 条目最多 512，解压总量最多 64 MB；拒绝加密、ZIP64、非常规压缩和路径穿越。
+- 拒绝宏、ActiveX、OLE/embeddings、externalLinks、customXml、可执行内容，以及包内所有 XML/RELS 中的 DOCTYPE、ENTITY、外部 Relationship、DDE、INCLUDETEXT 和嵌入内容。
+- 仅在内存中解包、替换标记、合并正文样式和编号并重打包；磁盘存储使用插件生成的 UUID，不使用用户路径。
+- 任务启动时重新读取并验证模板字节，之后切换默认或删除模板不改变已开始的任务。
+
+内置预览把已登记的本地 Word 字节交给 DSH Host 自己的 `officeKit.convert()`，在 MeetScribe 内显示返回的 PDF，不调用外部 Word/WPS。转换前检查普通文件、符号链接和大小，读取后检查文件是否变化；DSH 缺少 Office 组件或转换失败时向用户显示实际错误。
 
 ## 全局热键助手
 

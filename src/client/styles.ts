@@ -352,14 +352,36 @@ export const styles = String.raw`
 .ms-document-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ms-heading); font-size: 13px; font-weight: 600; }
 .ms-document-name small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; color: var(--ms-muted); font-size: 11px; }
 .ms-document-version, .ms-document-time { color: var(--ms-muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.ms-document-download { min-height: 32px; justify-self: end; padding: 4px 9px; text-decoration: none; font-size: 12px; }
-.ms-document-download svg { width: 14px; height: 14px; }
+.ms-document-open { min-height: 32px; justify-self: end; padding: 4px 9px; text-decoration: none; font-size: 12px; }
+.ms-document-open svg { width: 14px; height: 14px; }
 .ms-documents-empty { min-height: 360px; }
 .ms-documents-empty > svg { width: 32px; height: 32px; margin-bottom: 6px; fill: none; stroke: var(--ms-muted); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
 .ms-documents-empty .ms-action { margin-top: 10px; }
 .ms-documents-footer { display: flex; justify-content: space-between; gap: 20px; padding: 12px 2px; color: var(--ms-muted); font-size: 11px; }
 .ms-workspace-settings { flex: 1; min-height: 0; overflow: auto; background: var(--ms-subtle); }
 .ms-workspace-settings .ms-settings { max-width: 920px; background: transparent; padding: 28px 32px 40px; }
+.ms-document-preview-backdrop { position: fixed; inset: 0; z-index: 2147483200; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(15, 23, 32, .56); }
+.ms-document-preview { display: flex; flex-direction: column; width: min(1120px, 100%); height: min(920px, calc(100vh - 48px)); overflow: hidden; border: 1px solid var(--ms-line); border-radius: 12px; background: var(--ms-bg); box-shadow: 0 24px 80px rgba(0, 0, 0, .24); }
+.ms-document-preview > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 62px; padding: 10px 16px; border-bottom: 1px solid var(--ms-line); }
+.ms-document-preview > header > span { min-width: 0; display: grid; grid-template-columns: 22px minmax(0, auto); align-items: center; column-gap: 9px; }
+.ms-document-preview > header svg { grid-row: 1 / span 2; width: 20px; height: 20px; color: var(--ms-muted); }
+.ms-document-preview > header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ms-heading); font-size: 13px; }
+.ms-document-preview > header small { color: var(--ms-muted); font-size: 10px; }
+.ms-document-preview-frame { flex: 1; width: 100%; min-height: 0; border: 0; background: #525659; }
+.ms-document-preview-loading, .ms-document-preview-error { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; text-align: center; }
+.ms-document-preview-loading strong, .ms-document-preview-error strong { color: var(--ms-heading); font-size: 16px; }
+.ms-document-preview-loading p, .ms-document-preview-error p { max-width: 520px; color: var(--ms-muted); font-size: 12px; line-height: 1.7; }
+.ms-document-preview-error .ms-action { margin-top: 8px; }
+.ms-template-list { display: grid; gap: 8px; margin-top: 14px; }
+.ms-template-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--ms-line); border-radius: 8px; background: var(--ms-bg); }
+.ms-template-row.is-default { border-color: var(--ms-accent); }
+.ms-template-row strong { display: block; color: var(--ms-heading); font-size: 12px; }
+.ms-template-row small { display: block; margin-top: 3px; color: var(--ms-muted); font-size: 10px; overflow-wrap: anywhere; }
+.ms-template-actions { display: flex; align-items: center; gap: 7px; }
+.ms-template-default-badge { color: var(--ms-accent); font-size: 11px; font-weight: 600; }
+.ms-template-help { margin: 10px 0 0; padding: 10px 12px; border-left: 2px solid var(--ms-line); color: var(--ms-muted); font-size: 11px; line-height: 1.75; overflow-wrap: anywhere; }
+.ms-template-upload { position: relative; overflow: hidden; }
+.ms-template-upload input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 
 @keyframes ms-enter { from { opacity: 0; transform: translate(-50%, -6px); } to { opacity: 1; transform: translate(-50%, 0); } }
 @keyframes ms-pulse { 50% { opacity: .25; } }
@@ -406,7 +428,7 @@ export const styles = String.raw`
   .ms-document-name { grid-column: 1; grid-row: 1; }
   .ms-document-version { display: none; }
   .ms-document-time { grid-column: 1; grid-row: 2; margin-left: 46px; }
-  .ms-document-download { grid-column: 2; grid-row: 1 / span 2; }
+  .ms-document-open { grid-column: 2; grid-row: 1 / span 2; }
   .ms-documents-footer > span { display: none; }
   .ms-workspace-settings .ms-settings { padding: 20px 14px 30px; }
 }
@@ -417,8 +439,8 @@ export const styles = String.raw`
   .ms-workspace-nav button { font-size: 11px; }
   .ms-documents-heading p { max-width: 180px; }
   .ms-documents-heading .ms-action { font-size: 11px; }
-  .ms-document-download span { display: none; }
-  .ms-document-download { width: 32px; padding: 4px; }
+  .ms-document-open span { display: none; }
+  .ms-document-open { width: 32px; padding: 4px; }
   .ms-document-time { font-size: 10px; }
 }
 `

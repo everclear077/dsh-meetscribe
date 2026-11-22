@@ -37,6 +37,7 @@ export function normalizeSettings(input: unknown): MeetScribeSettings {
     asrReplacements: normalizeAsrReplacements(value.asrReplacements),
     minutesModel: normalizeMinutesModel(value.minutesModel),
     minutesIdleTimeoutMs: Math.round(clampNumber(value.minutesIdleTimeoutMs, 60000, 1800000, DEFAULT_SETTINGS.minutesIdleTimeoutMs)),
+    minutesTemplateId: typeof value.minutesTemplateId === 'string' && /^[a-f0-9-]{36}$/.test(value.minutesTemplateId) ? value.minutesTemplateId : null,
   }
 }
 

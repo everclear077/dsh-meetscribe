@@ -125,6 +125,20 @@ export interface MinutesModelCatalog {
   errors: string[]
 }
 
+export interface MinutesTemplateSummary {
+  id: string
+  name: string
+  fileName: string
+  createdAt: string
+  bytes: number
+  builtIn: boolean
+}
+
+export interface MinutesTemplateCatalog {
+  selectedId: string | null
+  templates: MinutesTemplateSummary[]
+}
+
 export interface MeetScribeSettings {
   shortcut: string
   silenceMs: number
@@ -141,6 +155,8 @@ export interface MeetScribeSettings {
   minutesModel: MinutesModelSelection | null
   /** Inactivity limit, not a total generation deadline. */
   minutesIdleTimeoutMs: number
+  /** Null uses the built-in template; custom templates are snapshotted when a task starts. */
+  minutesTemplateId: string | null
 }
 
 export interface ModelProgress {
@@ -187,4 +203,5 @@ export const DEFAULT_SETTINGS: MeetScribeSettings = {
   asrReplacements: [],
   minutesModel: null,
   minutesIdleTimeoutMs: DEFAULT_MINUTES_IDLE_TIMEOUT_MS,
+  minutesTemplateId: null,
 }

@@ -9,9 +9,9 @@
 
 ```text
 npm run typecheck  通过
-npm test           54/54 通过
+npm test           60/60 通过
 npm run sample:ui  通过，重新生成 12 张组件截图
-npm pack --dry-run 通过，35 个文件，不含模型缓存或测试产物
+npm pack <项目路径> --dry-run 通过，36 个文件，不含模型缓存或测试产物
 ```
 
 覆盖内容：
@@ -36,9 +36,24 @@ npm pack --dry-run 通过，35 个文件，不含模型缓存或测试产物
 - LLM 流收集不重复追加 block-end，支持无 delta 的块级回退，转发 reasoning effort 和最终字符进度；Harness `finish` 的 AUTH 等真实 failure 不再被误报为通用空内容，NO_ADAPTER 与 UNSUPPORTED_REASONING_EFFORT 指向识别设置，reasoning-only 与无响应超时分别给出可操作错误；
 - 无响应看门狗对停滞流执行 abort；合成流总耗时超过一个超时间隔，但每段思考/正文间隔低于阈值时仍成功完成，证明计时按活动重置而非固定总截止时间；
 - ASR 术语替换的中英混合、大小写、空白容忍、最长优先和英文整词边界；
-- LLM JSON 提取、schema 校验、事实约束提示词，以及原生 DOCX ZIP 签名、固定表格宽度、numbering 和页码域。
+- LLM JSON 提取、schema 校验、事实约束提示词，以及原生 DOCX ZIP 签名、固定表格宽度、numbering 和页码域；
+- 内置正式模板的新章节、8732 DXA 固定正文宽度、六列任务表、重复表头和“待确认”显示；空可选章节不生成，列表使用真正的 Word numbering；
+- 自定义模板保留页面设置，替换跨 runs 的元数据与正文标记，合并 `MeetScribe*` 样式并重映射编号；正文所有 `numId` 在合并后的 numbering 中有定义，不重复插入内置封面；
+- 缺失/重复正文标记、宏、根关系及辅助部件中的外部关系、ZIP 路径穿越均被拒绝；所有 XML/RELS 都进入校验；
+- 模板存储上传、目录、默认选择、删除和回退；删除后任务启动时取得的字节快照仍可使用；
+- Word 生成在模型请求之前读取模板，调用顺序明确为 `template → model`，并真正用自定义快照生成 DOCX；
+- DSH Office preview 通过 `officeKit.convert()` 的授权 source 读取已登记文件并返回 PDF，不调用外部打开；缺少 Office 组件和读取期间文件变化均返回明确错误。
 
-UI 截图脚本实际验证当前会议清空、全部历史二次确认、录音中清空后自动续录、绿色录音圆点、顶部纯图标控制、设置模型状态布局、术语保存、文档搜索/排序/刷新/下载路由，以及 360px 窄屏无横向溢出。新增验证进行中任务、模型接收字符数、失败原因、重试后替换失败卡片、完成版本下载和窄屏任务布局；纪要设置使用合成 DSH 对话模型目录响应，实际选择分组内的 Provider/Model、保存 reasoningEffort、调整无响应超时、刷新列表，并验证 360px 模型设置不溢出。DSH 对话交接使用合成回调验证完整提示只进入草稿边界、浮窗随后关闭，不自动调用生成接口。展开浮窗通过 `document.body` Portal 和模拟高层级左侧栏的 `elementFromPoint` 检查验证不会被遮挡。
+UI 截图脚本实际验证当前会议清空、全部历史二次确认、录音中清空后自动续录、绿色录音圆点、顶部纯图标控制、设置模型状态布局、术语保存、文档搜索/排序/刷新，以及 360px 窄屏无横向溢出。文件列表与浮窗“纪要文件”都断言不再存在下载链接，实际点击“在 DSH 中打开”，等待预览 dialog 与 PDF iframe 后关闭；已完成任务也显示同一打开入口。浮窗入口测试曾发现内部弹窗被浮窗层叠/裁剪拦截，随后将共用预览组件 Portal 到 `document.body` 并复测通过。任务覆盖进行中、模型接收字符数、失败原因、重试后替换失败卡片和窄屏布局；模板设置实际切换用户模板与内置模板默认状态，并展开内容标记说明。纪要设置使用合成 DSH 对话模型目录响应，实际选择分组内的 Provider/Model、保存 reasoningEffort、调整无响应超时、刷新列表，并验证 360px 模型设置不溢出。DSH 对话交接使用合成回调验证完整提示只进入草稿边界、浮窗随后关闭，不自动调用生成接口。展开浮窗通过 `document.body` Portal 和模拟高层级左侧栏的 `elementFromPoint` 检查验证不会被遮挡。
+
+## 本轮内置预览与模板验收边界
+
+- 已从 Harness 0.2.2-rc.5 源码核对内建 Office 预览链路：浏览器文档预览使用 `remote.officeKit.render()`，Host `OfficeKit.convert()` 也可直接接收授权后的 `OfficeKitSource`。MeetScribe 采用后者，不猜测不存在的 `openFile()`，也不依赖独立工作台没有挂载的 Session 右侧栏。
+- Host 预览接口、`officeKit.convert()` 字节读取、PDF 响应和 Client dialog/iframe 已由单元测试及合成 UI 覆盖；原样 DOCX 下载路由和 Client `documentUrl` 已移除。测试没有调用外部 Word/WPS。
+- **尚未在加载本轮代码的真实 Harness Desktop 中点击 PDF 预览**。合成 gallery 的 iframe 与 mock PDF 通过不等于 Electron 内置 PDF viewer 已通过；仍需在无活动录音、允许重启后验证实际转换、字体、关闭和失败提示。
+- 新默认样张标题明确标记“【合成示例】”，不包含真实会议文本。已用本机 Microsoft Word 不可见后台导出为 **4 页 PDF**，再用隔离安装的 pypdfium2/Pillow 渲染 4 张 PNG 并逐页查看：页眉、页码、跨页重复表头、六列任务表、长文本和“待确认”均未见溢出或异常分页。
+- 本次只实际验证了 Microsoft Word 后台导出；**LibreOffice 与 WPS 未验证**。自定义模板的单元测试覆盖 OOXML 合并和快照语义，但没有把任意第三方企业模板的真实 Word/WPS 兼容性记为通过。
+- 本轮未重启 Harness、未恢复最小化窗口、未接管前台输入，也未读取、复制或删除真实会议。未执行真实全部历史清空。
 
 ## 本轮纪要模型与超时修复验证边界
 
@@ -161,18 +176,19 @@ I'll sharehare the final report with the project manager.
 
 ## Word 与截图来源
 
-完整 Word 示例：`docs/samples/meeting-minutes-sample.docx`；渲染图：`docs/images/word-sample/page-1.png` 至 `page-3.png`。已检查 A4 中文商务排版、固定列宽、真实列表、页码、跨页重复表头和未知字段的“待补充/待确认”。
+完整 Word 示例：`docs/samples/meeting-minutes-sample.docx`；渲染图：`docs/images/word-sample/page-1.png` 至 `page-4.png`。当前 4 页合成样张已逐页检查 A4 黑白正式排版、固定列宽、真实列表、页码、跨页重复表头和未知字段的“待补充/待确认”。
 
 - `floating-transcript*.png`、`expanded-transcript*.png`、`meeting-details.png`、`minimized-dark.png`：真实 React 组件 + 明确的合成会议数据，不是识别准确率证据。
 - `workspace-documents-*.png`：真实工作台组件 + 3 个合成 Word 条目和合成进行中任务，不是用户真实文件列表。
-- `workspace-task-states-light.png`、`workspace-tasks-narrow.png`：合成失败/完成/进行中任务，用于检查错误、重试、下载和 360px 布局。
-- `settings-*.png`：真实设置组件 + 模拟模型/设置响应，使用合成的 `C:\Users\you\...` 路径，不包含个人本机信息。
+- `workspace-task-states-light.png`、`workspace-tasks-narrow.png`：合成失败/完成/进行中任务，用于检查错误、重试、内置打开入口和 360px 布局。
+- `settings-*.png`：真实设置组件 + 模拟模型/设置/模板目录响应，包含内置与“合成部门模板”，使用合成的 `C:\Users\you\...` 路径，不包含个人本机信息。
 - `harness-desktop-transcript.png`：旧识别引擎时期的历史窗口截图，不作为当前模型准确率证据。
 - `word-sample/*.png`：由示例 DOCX 渲染，不是 Word 界面样机。
 
 ## 尚未覆盖与限制
 
-- 新版模型管理界面、本轮纪要模型选择/超时设置和 DSH 对话草稿按钮尚未在重启后的真实 Harness Desktop 中完整点击复测；本轮因活动录音未重启，Host 接口、54 项测试和真实组件交互通过不等同于真实 GUI 通过；
+- 本轮 DSH 内置 PDF 预览、自定义模板管理和新正式模板尚未在加载新代码的真实 Harness Desktop 中完整点击复测；未重启 Harness。Host 接口、60 项测试、Word 后台渲染和真实组件交互通过不等同于真实 GUI 通过；
+- 自定义模板的 Word/WPS/LibreOffice 兼容性、极复杂页眉页脚和第三方企业模板尚未做通用保证；含宏、OLE、外部关系或动态外部字段的模板按安全设计拒绝；
 - 纪要任务只保存在 Host 内存，Harness 进程重启后任务列表不恢复；已生成 Word 与会议版本记录仍持久化；
 - 旧代码把 Word 纪要请求固定为 120 秒总时限，即使模型仍在生成也会中止；但仅凭那次提示不能反推当时是否另有 Provider 网络问题。新实现改为活动重置的无响应超时并保留真实终态错误，仍须在无活动录音后做真实复测；
 - 用户更早那次 Provider 的具体底层错误无法从旧“空内容”提示确定；新代码已透传终态 failure，仍须在再次发生时以实际错误为准；

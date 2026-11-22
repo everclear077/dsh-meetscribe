@@ -10,7 +10,7 @@ import {
 
 const sampleInput = {
   metadata: {
-    name: "产品周会",
+    name: "【合成示例】产品周会",
     topic: "11 月版本验收、灰度反馈与发布安排",
     date: "2026-11-19",
     startTime: "14:00",
