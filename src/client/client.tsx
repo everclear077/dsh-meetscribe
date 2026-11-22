@@ -14,6 +14,9 @@ interface ClientContext {
   shortcuts: { register(command: Record<string, unknown>): () => void }
   sidebarRight: { openTab(kind: string): void }
   sidebarRightTabs: { register(definition: Record<string, unknown>): () => void }
+  uiWorkspace: {
+    startSession(workspaceId?: string, options?: { prompt?: string; whenDraftExists?: 'replace' | 'append' | 'keep' }): void
+  }
   effect(callback: () => void | (() => void)): void
 }
 
@@ -26,7 +29,7 @@ function PanelIcon(): ReactNode {
 }
 
 export const name = 'dsh-meetscribe'
-export const inject = ['slots', 'shortcuts', 'sidebarRight', 'sidebarRightTabs']
+export const inject = ['slots', 'shortcuts', 'sidebarRight', 'sidebarRightTabs', 'uiWorkspace']
 
 export function apply(ctx: ClientContext): void {
   let shortcutRegistered = false
@@ -47,6 +50,11 @@ export function apply(ctx: ClientContext): void {
     if (document.body) themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-color-scheme'] })
     themeMedia.addEventListener('change', syncTheme)
     syncTheme()
+    meetings.setConversationHandoff((prompt) => {
+      // Harness owns session selection, model routing and the composer. The
+      // complete prompt remains a draft so the user can inspect it before send.
+      ctx.uiWorkspace.startSession(undefined, { prompt, whenDraftExists: 'append' })
+    })
     void meetings.init()
     const keydown = (event: KeyboardEvent): void => {
       if (shortcutRegistered) return
@@ -64,6 +72,7 @@ export function apply(ctx: ClientContext): void {
       delete document.documentElement.dataset.msTheme
       window.removeEventListener('keydown', keydown)
       window.removeEventListener('dsh-meetscribe:toggle', meetings.toggle)
+      meetings.setConversationHandoff(null)
       meetings.dispose()
     }
   })

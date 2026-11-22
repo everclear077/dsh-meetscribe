@@ -15,7 +15,7 @@ Harness Browser Client                             │
 ├─ shell.overlay / 右侧会议面板 / 左侧独立工作台     │
 ├─ 应用内 shortcuts + DOM 兼容兜底                  │
 ├─ getUserMedia / AudioWorklet / 16 kHz 重采样      │
-├─ 浏览器 RMS 静音分段（默认 800ms）                │
+├─ 连续 Silero VAD 会议分段（RMS 故障回退）       │
 └─ 会议控制器 + SSE 订阅                            │
        │ 本地 HTTP：PCM、控制、元数据                ▼
        ▼                                    Harness Cordis Host
@@ -25,7 +25,8 @@ Harness Browser Client                             │
                                                     │  └─ Silero VAD v6.2 GGUF
                                                     ├─ ERes2NetV2 embedding + 聚类
                                                     ├─ 原子 JSON 会议存储
-                                                    ├─ 显式 LLM 调用
+                                                    ├─ Host 内存纪要任务 + SSE 进度
+                                                    ├─ 显式 LLM 调用 / DSH 对话草稿
                                                     └─ 结构化校验 + 原生 DOCX
 ```
 
@@ -42,15 +43,20 @@ Harness Browser Client                             │
 - `sidebar.panellist`：左侧 MeetScribe 独立入口；
 - `main`：纪要文档库与识别设置组成的主工作台；
 - `sidebar.right.pane.tab`：右侧会议面板；
-- `shortcuts`：应用内 Ctrl+E。
+- `shortcuts`：应用内 Ctrl+E；
+- `uiWorkspace.startSession`：把完整会议整理提示作为 DSH 对话草稿追加，不自动发送。
 
-`meeting-controller.ts` 使用 `useSyncExternalStore` 管理会议状态、历史、计时、真实音量电平、说话人操作和生成任务。浮窗从关闭状态打开时自动开始或继续默认麦克风录音；SSE 接收 Host 的会议与模型事件。非 panel 浮窗通过 `react-dom` Portal 挂载到 `document.body`，避免被 `shell.overlay` 父级层叠上下文或左侧栏遮挡；录音控制位于顶部。
+`meeting-controller.ts` 使用 `useSyncExternalStore` 管理会议状态、历史、计时、真实音量电平、说话人操作和生成任务。浮窗从关闭状态打开时自动开始或继续默认麦克风录音；SSE 接收 Host 的会议、模型、`minutes-task` 与任务移除事件。非 panel 浮窗通过 `react-dom` Portal 挂载到 `document.body`，避免被 `shell.overlay` 父级层叠上下文或左侧栏遮挡；录音控制位于顶部。
+
+“在 DSH 对话中整理”先从 loopback Host 构造包含完整展示逐字稿、人工元数据和事实约束的提示，再调用 `ctx.uiWorkspace.startSession(undefined, { prompt, whenDraftExists: 'append' })`。Harness 负责工作区、会话选择、模型路由和 composer；追加模式不覆盖已有草稿，插件不执行发送。该路径生成 Markdown 对话结果，不自动进入 DOCX 服务。
 
 ### 独立文档工作台
 
 `workspace.tsx` 通过 `sidebar.panellist` 注册左侧 MeetScribe 图标，并以 `main` 插槽渲染完整主界面。默认“纪要文件”视图使用 `useMeetings()` 订阅现有会议存储，不建立第二份数据副本；`shared/documents.ts` 将每场会议的 `generatedFiles` 展平为文件条目，提供文件名/会议名称/路径搜索及名称、时间正倒序。每个版本使用原有 `/meetings/:id/documents/:version` 下载路由，不接受任意文件路径。
 
-“识别设置”复用 `MeetingSettings` 和既有 Settings/Model API；卸载 Harness `settings.section` 只改变入口，不改变设置持久化或识别行为。会议生成、删除和清空事件仍通过 SSE 更新同一控制器，工作台也可手动刷新摘要列表。
+“识别设置”复用 `MeetingSettings` 和既有 Settings/Model API；卸载 Harness `settings.section` 只改变入口，不改变设置持久化或识别行为。纪要模型区域另调用 `/minutes-models`，直接枚举 Harness 当前注册的 Provider/Model 和精确模型的 reasoning efforts。`minutesModel=null` 表示跟随 DSH；显式路由只用于新 Word 任务，不写回 DSH 默认模型。会议生成、删除和清空事件仍通过 SSE 更新同一控制器，工作台也可手动刷新摘要列表。
+
+工作台同时渲染 `state.minutesTasks`：running 任务固定在文档列表之前，展示准备、模型、解析和 Word 四阶段、单调进度及模型已接收字符数；失败卡片保留 Host 错误并提供重试，完成卡片按 `meetingId + version` 下载。导航显示进行中数量，空文档列表不会隐藏任务。Client 忽略乱序的旧任务快照，重试时用新 running 任务替换同会议 failed 卡片。
 
 ### 音频与分段
 
@@ -58,7 +64,8 @@ Harness Browser Client                             │
 - 启用回声消除，关闭自动增益与浏览器噪声抑制。
 - AudioWorklet 优先，ScriptProcessor 作为兼容兜底；真实采集电平节流后驱动浮窗声波。
 - 重采样到 16 kHz Float32 PCM，以 `sessionId + epoch + offset + final` 上传。
-- 浏览器 RMS 检测语音；默认连续静音 800ms 定稿，连续讲话最长约 12 秒自动分段。
+- 会议以连续 Silero VAD 开段，保留 1.5 秒滚动前置音频；默认连续静音 800ms 定稿，连续讲话最长约 12 秒自动分段。VAD 暂不可用或请求失败时回退 RMS，避免检测加载期间静默。
+- VAD 响应按全局样本序号对齐；partial 只上传已检测部分，final 保留在途尾部给下一段，防止异步边界丢字或重复。
 - partial 请求约每 100ms 增量上传，但 模型本身不是流式模型；Host 按有界间隔刷新临时快照，不是在浏览器中运行流式解码。
 - 当前 UI 不提供系统/混合采集入口。底层 `getDisplayMedia` 路径在 Harness 0.2.2-rc.5 实测拒绝该权限，成功路径尚未验证。
 - 自定义 MediaStream 的 track、AudioContext 和监听器在暂停、停止或异常时释放；关闭和最小化浮窗不会释放采集。
@@ -77,6 +84,8 @@ GET/PUT /settings
 GET  /models/status
 POST /models/download
 GET  /hotkey/status
+GET  /minutes-tasks
+GET  /minutes-models                    # 仅模型路由与能力元数据，无凭据
 GET/POST/DELETE /meetings
 GET/PATCH/DELETE /meetings/:id
 POST /meetings/:id/start|pause|resume|finish|clear
@@ -84,7 +93,8 @@ POST /meetings/:id/segments
 PATCH /meetings/:id/speakers/:speakerId
 POST /meetings/:id/speakers/merge
 POST /meetings/:id/segments/:segmentId/speaker
-POST /meetings/:id/generate
+POST /meetings/:id/generate                 # 202 + MinutesTask
+POST /meetings/:id/conversation-prompt      # 仅构造草稿文本，不调用 LLM
 GET  /meetings/:id/documents/:version
 ```
 
@@ -118,7 +128,7 @@ SenseVoice 的调用单位是完整 PCM 段：
 2. 模型加载后，段长至少 0.4 秒、距上次快照至少 900ms 且有足够新音频时，启动一次后台快照识别。
 3. 快照是不可变副本；原生调用借用该 PCM 直到 Promise 完成，期间不会追加或修改它。
 4. partial HTTP 请求返回最近一次已完成快照，不等待本次新快照，因此协议仍轻量，但文字刷新粒度受快照间隔与推理耗时影响。
-5. `final=1` 复用覆盖全部音频的在途快照，否则对完整段重新识别；800ms 静音分段来自浏览器，不由 SenseVoice 伪造成流式端点。
+5. `final=1` 复用覆盖全部音频的在途快照，否则对完整段重新识别；800ms 静音分段来自客户端连续 VAD 结果，不由 SenseVoice 伪造成流式端点。
 6. 一个 ASR 模型上的原生计算通过 Host 队列串行执行；同一 epoch 的并发 final 共享同一个 Promise 和缓存结果。
 7. `reset` 的代际计数防止在途旧结果写入复用 epoch；final 后还会再次检查会议是否仍存在，避免清空/删除后的旧文本写回。
 8. 原始模型文本与术语纠正后的展示文本分别返回和持久化；ITN 在每次推理时读取最新设置，无需重建模型。
@@ -127,11 +137,13 @@ SenseVoice 的调用单位是完整 PCM 段：
 
 ### 4.3 VAD
 
-会议断句由浏览器 RMS 和 800ms 静音设置决定。Silero VAD GGUF 用于 `detect()` / `vadOnly=1` 帧级语音检测通道；VAD session 独立串行，reset 时清理。它不是 Zipformer 的附属组件，也不再负责两个 ASR 引擎之间的切换。
+会议以 Silero VAD GGUF 的连续 `detect()` / `vadOnly=1` 帧级结果开段，并按 800ms 静音设置定稿；1.5 秒 prePad 覆盖检测窗和异步响应。VAD 不可用、请求失败或积压时回退 RMS，首个有效响应后恢复 VAD。VAD session 独立串行并跨 ASR epoch 保持连续，会话 start/stop/discard 时清理。它不负责 ASR 模型之间的切换。
 
 ### 4.4 声纹聚类
 
-`speaker-identifier.ts` 使用 `sherpa-onnx-node` 的 `SpeakerEmbeddingExtractor`。短于 0.8 秒的段不计算声纹。嵌入与既有簇质心计算余弦相似度，达到阈值则归入该说话人，否则创建匿名标签，直到达到最大人数。默认新建标签阈值由 0.62 调整为 **0.56**，配合默认 800ms 句末静音减少短段造成的同一人过度拆分；降低阈值也会增加相似音色被合并的可能，因此保留设置项和人工合并/重指派能力。
+`speaker-identifier.ts` 使用 `sherpa-onnx-node` 的 `SpeakerEmbeddingExtractor`。短于 0.8 秒的段不计算声纹。嵌入与既有簇质心计算余弦相似度，达到阈值则归入该说话人，否则创建匿名标签，直到达到最大人数。新装默认新建标签阈值为 **0.65**，已有用户自定义值不做自动迁移。已有会议每次识别前应用最新阈值和最大人数，不重建聚类器。
+
+只有相似度达到 `max(0.72, threshold + 0.06)` 的高置信匹配才增量更新质心；边界匹配可以保留当次标签，但不能把既有质心拉向可能是新声音的样本。该策略配合 0.65 修复了“一次边界误并后，后续不同声音持续合并”的在线聚类问题。阈值仍是折中：调低会减少同一人拆分，却更容易合并不同声音，因此保留设置项和人工合并/重指派能力。
 
 Electron 环境禁止 native external ArrayBuffer，因此调用 `extractor.compute(stream, false)`，让 N-API 返回 JavaScript 拥有的副本。公开 HTTP 会议响应会移除 embedding；本地 JSON 保留它供聚类使用。
 
@@ -139,7 +151,7 @@ Electron 环境禁止 native external ArrayBuffer，因此调用 `extractor.comp
 
 模型选择使用 `scripts/evaluate-speaker-models.mjs` 对 sherpa-onnx release 的公开说话人音频做同条件对照。ERes2NetV2 相比此前 CAM++ 的完整句同人平均相似度为 0.8333 / 0.8046，最短同人与最高异人分数间隔为 0.3978 / 0.3208；0.8 秒窗口的同人平均相似度为 0.6349 / 0.5628。样本规模较小且不是真人会议室，结果只支持本次模型选择，不构成泛化准确率承诺。
 
-另用本机 ERes2NetV2 对 6 段同一 Windows Huihui 合成语音做完整段、1.5 秒与 0.8 秒截断诊断。完整段和 1.5 秒输入在 0.62 下均保持一个标签；0.8 秒输入中有一段与既有质心相似度降至 0.577，旧阈值 0.62 将其错误新建为 `speaker-2`，0.56 则全部保持 `speaker-1`。随后加入的 Zira 不同声音相似度约 0.331，在 0.56 下仍新建独立标签。该诊断解释了本次阈值调整，但不证明真实会议室或相似音色的分离准确率。
+此前用本机 ERes2NetV2 对 6 段同一 Windows Huihui 合成语音做完整段、1.5 秒与 0.8 秒截断诊断，曾据此采用 0.56 减少短句拆分。本轮新增两种系统语音的明确双人回归后，发现 0.56 会把不同声音全部合并；当前因此改用 0.65 和保守质心更新。真实 ERes2NetV2 复测中，两种发言顺序都形成两个标签并正确归类后续段。短段旧样本继续作为显式 0.56 回归，而不是声称一个阈值适合所有场景。这些诊断都不证明真人会议室、远场或重叠语音的分离准确率。
 
 ### 4.5 术语纠正
 
@@ -157,22 +169,26 @@ Electron 环境禁止 native external ArrayBuffer，因此调用 `extractor.comp
 - 用户元数据和生成文件版本；
 - 改名、合并、逐段指派和订阅事件。
 
-写入流程为临时文件 → `rename`，删除旧会议前先等待其待处理写入，避免清空后的旧异步写入重新创建文件。启动时把异常中断的 recording 状态恢复为可操作状态。设置同样采用原子写入和范围校验；旧 `modelHost`、`senseVoice` 字段在读取时迁移丢弃，输出目录、800ms 分段、ITN 和术语表保持不变。
+写入流程为临时文件 → `rename`，删除旧会议前先等待其待处理写入，避免清空后的旧异步写入重新创建文件。启动时把异常中断的 recording 状态恢复为可操作状态。设置同样采用原子写入和范围校验；旧 `modelHost`、`senseVoice` 字段在读取时迁移丢弃，输出目录、800ms 分段、ITN 和术语表保持不变。新增 `minutesModel` 只保留 provider、model 和可选 reasoningEffort，未知字段（包括任何凭据字段）不会进入规范化结果；缺省为 null。`minutesIdleTimeoutMs` 限制在 60000–1800000，缺省 300000。
 
 清空采用替换语义：Host 先重置该会议的 ASR、音频与说话人状态并解除活动会议，再删除旧会议，创建带新 ID 的空白会议；标题、元数据和生成文件版本保留，segments、speakers 与 vocabulary 清空。新 ID 配合 epoch/会话校验，防止在途 final 请求把旧文本写回。
 
 `DELETE /meetings` 重置并删除全部会议，用于历史记录的二次确认清空；若调用前正在录音，客户端随后自动创建空白会议并重新开始默认麦克风采集。它不会删除输出目录中已经生成的 Word 文件。
 
+`MinutesTaskManager` 只把任务保存在 Host 内存，按会议维护 active lock；同会议 running 时重复生成返回原任务，终态后释放锁，最多保留 20 个已结束任务。删除会议、清空逐字稿或清空历史后移除对应终态任务，并用 `minutes-tasks-removed` 同步所有 Client。running 任务期间禁止这些破坏性操作。Harness 进程重启不会恢复任务列表，但已落盘的会议与 Word 版本不受影响。
+
 Windows 数据目录：`%LOCALAPPDATA%\dsh-meetscribe`。当前不保存原始音频文件。
 
 ## 6. 显式 LLM 与 Word
 
-只有 `POST /meetings/:id/generate` 会进入 LLM 路径：
+Word 生成路径只有用户点击后的 `POST /meetings/:id/generate` 会进入 LLM；独立的 DSH 对话路径只在用户检查草稿并主动发送后由 Harness 调用模型：
 
 ```text
 术语纠正后的展示逐字稿 + segmentId + 说话人 + 用户元数据
        ↓
-Harness 当前默认模型（流式 text-delta 收集）
+MeetScribe 显式纪要模型；minutesModel=null 时读取 DSH 默认选择
+       ↓
+Harness llm.stream（无响应看门狗 + 流式 text-delta 收集）
        ↓
 JSON 提取 + 严格 schema 校验
        ↓
@@ -182,6 +198,12 @@ docx 原生 OOXML 渲染
 ```
 
 用户元数据具有权威性。提示词禁止虚构参会人、负责人、日期、地点和决议，未知字段使用“待补充/待确认”。源 segmentId 用于追溯，但当前没有自动验证每条模型总结是否真正忠实于该段，仍需人工复核。
+
+`MinutesTaskManager` 在后台执行上述流程，按 preparing(10%) → model(25% 起) → parsing(80%) → document(90%) → completed(100%) 广播。首个 reasoning 事件会报告实际推理字符数但进度保持 25%；正文首个 delta 后提高到 45%，后续约每 512 个推理或正文字符以及结束时报告实际计数。进度只前进且完成前不超过 95%。关闭浮窗或切换工作台页面不取消任务。
+
+`listMinutesModels()` 直接调用当前安装 Harness 的 `sessionController.modelCatalog()`。这正是浏览器对话模型选择器通过 `remote.session.modelCatalog()` 读取的 Host 目录，因此 MeetScribe 不再用 `llm.listProviders/listModels/resolveModelInfo` 另建一份可能不同的投影。插件保留 DSH 返回的 Provider 分组、组内模型顺序、模型名称、说明、`reasoning.efforts/defaultEffort` 和按 Provider 隔离的 failures，并复用对话选择器的账号/官方 Provider 优先顺序与“DeepSeek 账号”显示名。目录整体读取失败时显示真实错误，不回退到另一套枚举；公开响应不包含 Provider 配置或凭据。最终生成请求仍由 Harness 校验路由与推理强度。
+
+`llm.ts` 收集 `text-delta`，按 block index 防止 `block-end` 重复追加，并支持只有 assembled block 的适配器；reasoning 只计数，不混入正文。显式 `minutesModel` 优先，只有 null 才调用 `agentDefaultModel.currentSelection()`。请求使用可重置的 `AbortController` 看门狗：每个流事件都重置无响应计时，不再使用 `AbortSignal.timeout(120000)` 作为总期限；超时后中止请求并报告实际无响应时长。除迭代异常外，还处理 Harness 规范化的 `finish.reason.kind=error|aborted`，透传实际 failure code/message，并对 NO_ADAPTER 和 UNSUPPORTED_REASONING_EFFORT 指出设置修复入口。只有正常终态且确实没有正文时才区分 reasoning-only、输出长度上限或空流，不再统一报“空内容”。诊断日志只记录事件计数、reasoning 字符数和 finish kind，不记录会议或模型正文。
 
 `src/word/document.ts` 使用 A4、中文字体、固定 DXA 列宽、真实 numbering、页码和重复表头。输出不经过 Markdown。当前一次性发送整场会议；长会议的分块和层级总结属于后续工作。
 

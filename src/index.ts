@@ -12,7 +12,9 @@ import { isLoopbackRequest, sameOriginRequest } from './host/security.ts'
 import { removeFillerWords } from './shared/speaker.ts'
 import type { Meeting, MeetScribeSettings, ModelProgress } from './shared/types.ts'
 import { startGlobalHotkeyHelper, stopGlobalHotkeyHelper } from './host/native-helper.ts'
-import { generateWordMinutes } from './host/minutes-service.ts'
+import { buildConversationMinutesPrompt, generateWordMinutes } from './host/minutes-service.ts'
+import { listMinutesModels } from './host/llm.ts'
+import { MinutesTaskManager } from './host/minutes-tasks.ts'
 import { selectWindowsDirectory } from './host/folder-picker.ts'
 import { createAsrReplacer } from './host/text-replacements.ts'
 
@@ -24,8 +26,9 @@ export { SpeakerClusterer, cosineSimilarity, removeFillerWords } from './shared/
 export { createAsrReplacer } from './host/text-replacements.ts'
 export { normalizeAsrReplacements, parseAsrReplacements, formatAsrReplacements } from './shared/vocabulary.ts'
 export { collectMinutesDocuments, queryMinutesDocuments } from './shared/documents.ts'
-export { completeWithDefaultModel } from './host/llm.ts'
-export { buildTranscriptForMinutes } from './host/minutes-service.ts'
+export { completeWithDefaultModel, completeWithModel, listMinutesModels } from './host/llm.ts'
+export { buildTranscriptForMinutes, buildConversationMinutesPrompt } from './host/minutes-service.ts'
+export { MinutesTaskManager } from './host/minutes-tasks.ts'
 export { createAsrRuntime, pcmToSamples } from './host/local-asr-runtime.ts'
 export { LOCAL_MODEL_CATALOG, LocalModelManager, localModelPath, resolveLocalModelPaths } from './host/model-manager.ts'
 export { ensureUrlFile, fileSha256 } from './host/download.ts'
@@ -91,6 +94,7 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
   const modelRoot = join(dataRoot, 'models')
   const modelManager = new LocalModelManager(modelRoot)
   const clients = new Set<ServerResponse>()
+  const minutesTasks = new MinutesTaskManager()
   let activeMeetingId: string | null = null
   let preparingModels: Promise<void> | null = null
   let lastProgress: ModelProgress | null = null
@@ -151,6 +155,8 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       if (meeting) send('meeting', publicMeeting(meeting))
     }
   })
+
+  minutesTasks.subscribe((task) => send('minutes-task', task))
 
   function modelStatus(): Record<string, unknown> {
     const status = asr.modelStatus()
@@ -378,11 +384,23 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       respondJson(res, 200, startGlobalHotkeyHelper())
       return
     }
+    if (path === '/minutes-tasks' && req.method === 'GET') {
+      respondJson(res, 200, minutesTasks.list())
+      return
+    }
+    if (path === '/minutes-models' && req.method === 'GET') {
+      respondJson(res, 200, await listMinutesModels(ctx))
+      return
+    }
     if (path === '/meetings' && req.method === 'GET') {
       respondJson(res, 200, store.list().map(summarizeMeeting))
       return
     }
     if (path === '/meetings' && req.method === 'DELETE') {
+      if (minutesTasks.hasRunning()) {
+        respondJson(res, 409, { error: '有会议纪要正在生成，请完成后再清空历史' })
+        return
+      }
       const all = store.list()
       for (const meeting of all) {
         asr.reset(meeting.id)
@@ -391,6 +409,8 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       }
       activeMeetingId = null
       await store.deleteAll()
+      minutesTasks.remove()
+      send('minutes-tasks-removed', {})
       respondJson(res, 200, { ok: true })
       return
     }
@@ -423,21 +443,33 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       return
     }
     if (!action && req.method === 'DELETE') {
+      if (minutesTasks.active(meetingId)) {
+        respondJson(res, 409, { error: '该会议的纪要正在生成，请完成后再删除' })
+        return
+      }
       if (activeMeetingId === meetingId) {
         asr.reset(meetingId)
         clearAudio(meetingId)
         activeMeetingId = null
       }
       await store.delete(meetingId)
+      minutesTasks.remove(meetingId)
+      send('minutes-tasks-removed', { meetingId })
       respondJson(res, 200, { ok: true })
       return
     }
     if (action === 'clear' && req.method === 'POST') {
+      if (minutesTasks.active(meetingId)) {
+        respondJson(res, 409, { error: '该会议的纪要正在生成，请完成后再清空逐字稿' })
+        return
+      }
       asr.reset(meetingId)
       clearAudio(meetingId)
       speakerIdentifier.reset(meetingId)
       if (activeMeetingId === meetingId) activeMeetingId = null
       const cleared = await store.clearTranscript(meetingId)
+      minutesTasks.remove(meetingId)
+      send('minutes-tasks-removed', { meetingId })
       respondJson(res, 200, publicMeeting(cleared))
       return
     }
@@ -522,10 +554,21 @@ export function apply(ctx: Context & { webServer: { register(route: { kind: 'pre
       respondJson(res, 200, publicMeeting(updated))
       return
     }
+    if (action === 'conversation-prompt' && req.method === 'POST') {
+      if (meeting.segments.length === 0) {
+        respondJson(res, 400, { error: '当前会议还没有逐字稿，无法在 DSH 对话中整理' })
+        return
+      }
+      respondJson(res, 200, { prompt: buildConversationMinutesPrompt(meeting) })
+      return
+    }
     if (action === 'generate' && req.method === 'POST') {
-      if (meeting.segments.length === 0) throw new Error('当前会议还没有逐字稿，无法生成纪要')
-      const generated = await generateWordMinutes(ctx, store, settings.get(), meetingId)
-      respondJson(res, 200, generated)
+      if (meeting.segments.length === 0) {
+        respondJson(res, 400, { error: '当前会议还没有逐字稿，无法生成纪要' })
+        return
+      }
+      const task = minutesTasks.start(meeting, (progress) => generateWordMinutes(ctx, store, settings.get(), meetingId, progress))
+      respondJson(res, 202, task)
       return
     }
     const downloadMatch = action.match(/^documents\/(\d+)$/)

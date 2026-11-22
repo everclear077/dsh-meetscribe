@@ -3,8 +3,8 @@
  *
  * SenseVoiceSmall-Q8_0.gguf is non-streaming. During a browser-delimited segment
  * we refresh a cached temporary result from immutable PCM snapshots; final=1
- * transcribes the complete segment. Browser RMS segmentation remains the meeting
- * endpoint mechanism; Silero GGUF serves the optional frame-level detect() channel.
+ * transcribes the complete segment. Meetings use Silero VAD segmentation through
+ * detect(); RMS remains a compatibility fallback for other voice interactions.
  */
 import { statSync } from 'node:fs'
 import {
@@ -78,7 +78,7 @@ export interface AsrRuntime {
     epoch?: number,
     manualPressed?: boolean,
   ): Promise<{ text: string; rawText?: string; loading?: boolean; endpoint?: boolean; isSpeech?: boolean }>
-  detect(sessionId: string, samples: Float32Array): Promise<{ isSpeech: boolean }>
+  detect(sessionId: string, samples: Float32Array): Promise<{ isSpeech: boolean; available: boolean }>
   reset(sessionId: string): void
   dispose(): void
   modelStatus(): ModelsStatus
@@ -433,7 +433,7 @@ export function createAsrRuntime(
     feed,
     detect: async (sessionId, samples) => {
       const model = await ensureVadModel()
-      if (!model || disposed) return { isSpeech: false }
+      if (!model || disposed) return { isSpeech: false, available: false }
       let current = detectSessions.get(sessionId)
       if (!current) {
         current = { session: model.createVadSession(), lastUse: now() }
@@ -442,7 +442,7 @@ export function createAsrRuntime(
       current.lastUse = now()
       const result = await enqueueVad(() => current!.session.streamFeed(samples))
       const probability = result.probs.at(-1) ?? 0
-      return { isSpeech: probability >= 0.35 }
+      return { isSpeech: probability >= 0.35, available: true }
     },
     reset: (sessionId) => {
       segments.delete(sessionId)

@@ -90,7 +90,7 @@ function Details(): ReactNode {
 function Files(): ReactNode {
   const { current } = useMeetings()
   return <div className="ms-detail"><section className="ms-section"><h3>Word 会议纪要</h3>
-    {!current?.generatedFiles.length && <div className="ms-empty"><strong>还没有生成文件</strong><small>暂停录音后点击“生成纪要”。只有此时才会把逐字稿发送给 DSH 当前配置的大模型。</small></div>}
+    {!current?.generatedFiles.length && <div className="ms-empty"><strong>还没有生成文件</strong><small>暂停录音后点击“生成纪要”会将逐字稿发送给所选纪要模型；也可点击对话图标先创建草稿。</small></div>}
     {[...(current?.generatedFiles ?? [])].reverse().map((file) => <div className="ms-file" key={file.version}><span className="ms-file-icon">W</span><div className="ms-file-info"><strong>{current!.title} · 第 {file.version} 版</strong><small>{new Date(file.createdAt).toLocaleString('zh-CN')}</small></div><a className="ms-action" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center' }} href={`/meetscribe/meetings/${encodeURIComponent(current!.id)}/documents/${file.version}`} download>下载 .docx</a></div>)}
   </section></div>
 }
@@ -142,7 +142,8 @@ function MeetingView({ panel = false }: { panel?: boolean }): ReactNode {
       <div className="ms-header-actions">
         <button className="ms-icon ms-record-control" aria-label={state.busy ? '请稍候' : recording ? '暂停' : '继续'} title={state.busy ? '正在准备默认麦克风' : recording ? '暂停录音' : '继续录音'} onClick={meetings.toggleRecording} disabled={state.busy || !current}><Icon name={recording ? 'pause' : 'play'} /></button>
         <button className="ms-icon ms-clear-control" aria-label="清空" title="清空当前逐字稿" onClick={() => void meetings.clear()} disabled={state.busy || !canClear}><Icon name="clear" /></button>
-        <button className="ms-icon" aria-label="生成纪要" title={state.generating ? '正在生成纪要' : '生成 Word 会议纪要'} aria-busy={state.generating} onClick={() => void meetings.generate()} disabled={!current?.segments.length || state.generating || state.busy || recording}><Icon name="file" /></button>
+        <button className="ms-icon" aria-label="在 DSH 对话中整理" title="将完整逐字稿和纪要要求放入 DSH 对话，检查后再发送" onClick={() => void meetings.openInConversation()} disabled={!current?.segments.length || state.busy || recording}><Icon name="chat" /></button>
+        <button className="ms-icon" aria-label="生成纪要" title={state.generating ? '正在后台生成 Word，可在独立工作台查看进度' : '后台生成 Word 会议纪要'} aria-busy={state.generating} onClick={() => void meetings.generate()} disabled={!current?.segments.length || state.generating || state.busy || recording}><Icon name="file" /></button>
         <span className="ms-header-divider" />
         {!panel && <button className="ms-icon" title="最小化" onClick={meetings.minimize}><Icon name="minimize" /></button>}
         {!panel && <button className="ms-icon" title={state.expanded ? '收起详情' : '展开详情'} onClick={meetings.expand}><Icon name={state.expanded ? 'collapse' : 'expand'} /></button>}

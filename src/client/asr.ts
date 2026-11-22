@@ -2,7 +2,8 @@
  * Browser audio capture and meeting segmentation.
  *
  * - The default microphone is resampled to 16 kHz PCM and uploaded incrementally.
- * - Browser RMS segmentation finalizes after the configured silence (800 ms by default).
+ * - Meetings use continuous Silero VAD segmentation with a pre-roll buffer; other
+ *   voice interactions retain RMS segmentation. Both honor the configured silence.
  * - Local SenseVoice is non-streaming: the Host refreshes cached segment snapshots for
  *   temporary text, then transcribes the complete segment when final=1 arrives.
  * - Optional vadOnly requests use the local Silero GGUF for frame-level speech detection.
@@ -83,8 +84,10 @@ export interface AsrConfig {
   acquireAudio?: () => Promise<MediaStream>
   /** Release resources associated with a custom stream (for example its mixer). */
   releaseAudio?: (stream: MediaStream) => void | Promise<void>
-  /** 静音多少 ms 判句结束（默认 800，由浏览器 RMS 分段）。 */
+  /** 静音多少 ms 判句结束（会议 VAD 或其他交互的 RMS 分段共用）。 */
   silenceMs: number
+  /** 会议使用连续 Silero VAD 开段；缺省 RMS 保持既有语音交互行为。 */
+  segmentation?: 'rms' | 'vad'
   /** host 路由前缀。 */
   basePath: string
   /** 交互模式：hold 按住说话（未按住不持续聆听）；toggle 持续聆听（默认）。 */
@@ -177,6 +180,8 @@ const MAX_SEGMENT_MS = 12000
 /** 最小语音时长（P1-3）：不足视为短促噪声，静音到点后放弃本段不发送。 */
 const MIN_SPEECH_MS = 250
 const PRE_PAD_MS = 250
+/** VAD 响应异步到达，会议保留更长的滚动句首，覆盖检测窗与短暂调度延迟。 */
+const VAD_PRE_PAD_MS = 1500
 /** Issue #15 批 1（ADR-0012）：播放期预录环长（打断抢救种子）。推导见计划 §6：
  *  覆盖「VAD 首真→hardBreak 确认」全窗（confirm 252~597ms + 检测往返 p99≈430ms）≈1.1s
  *  量级，2000ms≈1.8× 覆盖；并入起点锚定语音起始时刻，环长只决定极端慢确认的丢失上界。 */
@@ -194,6 +199,8 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
   const wakeWord = (config.wakeWord ?? '').trim().toLowerCase().replace(/[\s\u3000]+/g, '')
   /** 唤醒词门仅在 toggle 模式生效（hold 模式按住即说，无需唤醒词门，避免状态条误显「说唤醒词」）。 */
   const wakeEnabled = wakeWord !== '' && config.mode !== 'hold'
+  /** 仅普通会议聆听启用连续 VAD；wake/hold 的既有状态机保持不变。 */
+  const vadSegmentation = config.segmentation === 'vad' && !wakeEnabled && config.mode !== 'hold'
   /** 批 7O（ADR-0006）：运行时打断方式。detect 模式下经第一级探测（echoCancellation）在
    *  startRecorder 内落为 'auto'/'manual'；auto/manual 显式取值保持原样。 */
   let runtimeBargeInMode: 'auto' | 'manual' | 'detect' = config.bargeInMode ?? 'auto'
@@ -256,6 +263,14 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
   let speechMs = 0
   let silenceMs = 0
   let prePad: Float32Array[] = []
+  /** 会议 VAD 的全局样本时钟：检测响应和 ASR 段按同一坐标切分，避免异步尾部串段。 */
+  let captureSamples = 0
+  let detectAckSamples = 0
+  let segmentStartSample = 0
+  let lastVadSpeechSample = 0
+  /** 首个有效 VAD 响应前及检测失败时使用 RMS 兜底，不因 VAD 加载而静默。 */
+  let vadReady = false
+  let vadFallbackNotified = false
   /** hold 模式：按住录制中（绕过 VAD 门控与静音切句，整段按压区间保留）。 */
   let holdActive = false
   /** P3-2 回声参考（可选；缺失时原信号透传）。 */
@@ -400,6 +415,27 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     detectFailStreak = 0
   }
 
+  const chunkSamples = (chunks: Float32Array[]): number => chunks.reduce((n, c) => n + c.length, 0)
+
+  /** 在精确样本边界拆分 immutable PCM；尾部保留给下一 VAD 段，不丢弃也不重复。 */
+  const splitChunks = (chunks: Float32Array[], at: number): { head: Float32Array[]; tail: Float32Array[] } => {
+    const cut = Math.max(0, Math.min(chunkSamples(chunks), Math.floor(at)))
+    const head: Float32Array[] = []
+    const tail: Float32Array[] = []
+    let offset = 0
+    for (const chunk of chunks) {
+      const end = offset + chunk.length
+      if (end <= cut) head.push(chunk)
+      else if (offset >= cut) tail.push(chunk)
+      else {
+        head.push(chunk.subarray(0, cut - offset))
+        tail.push(chunk.subarray(cut - offset))
+      }
+      offset = end
+    }
+    return { head, tail }
+  }
+
   /** 从分块缓冲的 from 样本起切片（增量上传；不做全量 concat）。 */
   const sliceChunks = (chunks: Float32Array[], from: number): Float32Array => {
     let total = 0
@@ -447,13 +483,17 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     await resetGate
     // 等待期间段可能已被清（静音弃段/打断弃段）：重查守卫。
     if (partialInFlight || segment.length === 0) return
-    const total = segment.reduce((n, c) => n + c.length, 0)
-    const seconds = total / SAMPLE_RATE
+    const total = chunkSamples(segment)
+    // VAD 模式下不得把尚未检测的尾部送进旧 ASR 段；否则静音切割后 Host 无法撤回尾部。
+    const uploadLimit = vadSegmentation && vadReady
+      ? Math.max(0, Math.min(total, detectAckSamples - segmentStartSample))
+      : total
+    const seconds = uploadLimit / SAMPLE_RATE
     if (seconds < PARTIAL_MIN_S || seconds > PARTIAL_MAX_S) return
     // P1-4：只传增量；已上传水位 uploadedSamples 在成功后推进。
     const from = uploadedSamples
-    if (total - from <= 0) return
-    const samples = sliceSince(from)
+    if (uploadLimit - from <= 0) return
+    const samples = sliceSince(from).subarray(0, uploadLimit - from)
     const epoch = segmentEpoch
     partialInFlight = true
     try {
@@ -504,11 +544,15 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
           // I2 修复：re-enter 已 asr.reset 清空 host 流（fed=0），旧增量水位作废——
           // 从 0 全量重发本段（段仍在本地内存），否则 host 只收到尾巴、定稿缺前半句。
           uploadedSamples = 0
+          const recoveredSamples = sliceSince(0)
+          const recoveredLimit = vadSegmentation && vadReady
+            ? Math.max(0, Math.min(recoveredSamples.length, detectAckSamples - segmentStartSample))
+            : recoveredSamples.length
           try {
             res = await fetch(asrUrl(false, 0, epoch), {
               method: 'POST',
               headers: { 'content-type': 'application/octet-stream' },
-              body: sliceSince(0).buffer as ArrayBuffer,
+              body: recoveredSamples.subarray(0, recoveredLimit).buffer as ArrayBuffer,
               signal: AbortSignal.timeout(5000), // I1：恢复重发同样要超时（挂起不 reject 会锁死 partialInFlight）
             })
           } catch {
@@ -596,30 +640,73 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     }
   }
 
+  const markVadUnavailable = (reason: string): void => {
+    if (!vadSegmentation) return
+    vadReady = false
+    if (!vadFallbackNotified) {
+      vadFallbackNotified = true
+      console.warn(`[dsh-meetscribe] VAD segmentation unavailable; using RMS fallback (${reason})`)
+    }
+  }
+
+  /** 将一次已确认的 VAD 窗口映射到会议分段；requestEndSample 是该窗口的全局末尾。 */
+  const applyMeetingVad = (speech: boolean, requestEndSample: number, requestSamples: number): void => {
+    vadReady = true
+    vadFallbackNotified = false
+    detectAckSamples = Math.max(detectAckSamples, requestEndSample)
+    if (speech) {
+      if (!speechActive) {
+        // 保留检测窗与在途期间的全部前置帧，低 RMS 句首也能进入 ASR。
+        segment = prePad
+        prePad = []
+        const seededSamples = chunkSamples(segment)
+        segmentStartSample = Math.max(0, captureSamples - seededSamples)
+        segmentMs = (seededSamples / SAMPLE_RATE) * 1000
+        speechMs = 0
+        silenceMs = 0
+        uploadedSamples = 0
+        speechActive = true
+        utteranceEndAt = null
+        setState('speech')
+      }
+      lastVadSpeechSample = Math.max(lastVadSpeechSample, requestEndSample)
+      speechMs += (requestSamples / SAMPLE_RATE) * 1000
+      silenceMs = 0
+      return
+    }
+    if (!speechActive) return
+    const cutSample = lastVadSpeechSample + Math.round((config.silenceMs / 1000) * SAMPLE_RATE)
+    if (requestEndSample < cutSample) return
+    const total = chunkSamples(segment)
+    const cut = Math.max(0, Math.min(total, cutSample - segmentStartSample))
+    if (cut === 0) {
+      markVadUnavailable('sample clock mismatch')
+      return
+    }
+    // 短语音也交给 ASR，不再按 250ms 硬删除整句。
+    finalizeSegment(false, cut)
+  }
+
   /**
-   * 打断根治：播放期检测上行（vadOnly=1）。AI 朗读中段内无语音帧（自聊防护），
-   * 常规 partial 断流 → host VAD 看不到用户语音 → isSpeech 恒 false → 打断失效。
-   * 此通道把 AEC 后 mic 帧持续送 host 独立检测 VAD（不进 ASR 流、不碰端点 VAD），
-   * 使「开口打断」在朗读中真实可用。失败静默（下一拍自动补传未发送部分）。
+   * 会议连续 VAD 与播放期打断共用 vadOnly 上行；检测失败时会议由 RMS 兜底。
    */
   const requestDetect = async (): Promise<void> => {
     if (detectInFlight) return
-    // 积压上界：网络失败或宿主卡顿时丢弃最旧帧——检测只关心「当前是否在说话」，
-    // 陈旧音频无价值；防无界增长与超 64s（4MB）后每包必被 host 413 的死锁。
-    // A 档修复：30s → 1s。停顿后补传整段积压会让下一次往返更慢（正反馈），
-    // 而对「此刻是否在说话」而言 1s 之前的音频已无意义。
-    let total = detectChunks.reduce((n, c) => n + c.length, 0)
-    const MAX_DETECT_PENDING = 1 * SAMPLE_RATE
+    // 会议积压超界时先落 RMS，绝不把“未检测”误当“静音”。
+    let total = chunkSamples(detectChunks)
+    const MAX_DETECT_PENDING = (vadSegmentation ? 2 : 1) * SAMPLE_RATE
     if (total - detectSent > MAX_DETECT_PENDING) {
+      markVadUnavailable('request backlog')
       detectSent = Math.max(0, total - MAX_DETECT_PENDING)
     }
     while (detectChunks.length > 0 && detectSent >= detectChunks[0].length) {
       detectSent -= detectChunks[0].length
       detectChunks.shift()
     }
-    total = detectChunks.reduce((n, c) => n + c.length, 0)
+    total = chunkSamples(detectChunks)
     if (total - detectSent <= 0) return
     const samples = sliceChunks(detectChunks, detectSent)
+    const requestEndSample = captureSamples
     const epoch = segmentEpoch
     const gen = detectGeneration
     detectInFlight = true
@@ -636,10 +723,20 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         signal: AbortSignal.timeout(5000), // 防服务端挂起长期锁死 detectInFlight（Important#2）
       })
       rttMs = Date.now() - sentAt
-      if (epoch !== segmentEpoch || gen !== detectGeneration) return // 弃段/重置后迟到响应作废
-      if (!res.ok) return
-      const out = (await res.json()) as { isSpeech?: boolean }
-      if (epoch !== segmentEpoch || gen !== detectGeneration) return
+      // 连续会议 VAD 跨 ASR epoch 存活；stop/start/discard 才推进 detectGeneration。
+      if (gen !== detectGeneration || (!vadSegmentation && epoch !== segmentEpoch)) return
+      if (!res.ok) {
+        markVadUnavailable(`HTTP ${res.status}`)
+        if (++detectFailStreak >= 3) emit(noticeListeners, 'detectFail')
+        return
+      }
+      const out = (await res.json()) as { isSpeech?: boolean; available?: boolean }
+      if (gen !== detectGeneration || (!vadSegmentation && epoch !== segmentEpoch)) return
+      if (vadSegmentation && (out.available === false || out.isSpeech === undefined)) {
+        markVadUnavailable('model loading or unavailable')
+      } else if (vadSegmentation && out.isSpeech !== undefined) {
+        applyMeetingVad(out.isSpeech, requestEndSample, samples.length)
+      }
       // Issue #15 批 1（ADR-0012）：VAD 首真 → 记录抢救种子起点。锚**请求体起点-250ms**
       // （非 sentAt/响应到达）：VAD 首真只证明「语音在本次请求窗内」，窗内位置不定；RTT 大时
       // 在途抑制把 cadence 拉长（p99≈430ms → 窗≈430ms），sentAt 滞后语音起点多达一个窗长，
@@ -654,7 +751,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         preRollSeedWall = reqBodyStartWall - 250
       }
       if (out.isSpeech !== undefined) deliverIsSpeech(out.isSpeech)
-      detectFailStreak = 0 // Issue #15 批 7：成功即清零
+      if (out.available !== false) detectFailStreak = 0
       detectSent += samples.length
       // 释放已消费帧（长朗读下防缓冲无界增长）。
       while (detectChunks.length > 0 && detectSent >= detectChunks[0].length) {
@@ -662,8 +759,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         detectChunks.shift()
       }
     } catch {
-      // 超时/网络波动：未推进水位，下一拍重传；Issue #15 批 7：连续 3 次才提示
-      // （打断检测通道持续断 = 打断失效，用户该知道）。
+      markVadUnavailable('request failed')
       if (++detectFailStreak >= 3) emit(noticeListeners, 'detectFail')
     } finally {
       detectInFlight = false
@@ -695,13 +791,14 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     })()
   }
 
-  /** prePad 环裁剪：只保留最近 PRE_PAD_MS 的帧（起始音补齐用，wake 与正常聆听共用）。 */
+  /** prePad 环裁剪：RMS 保留 250ms；会议 VAD 保留 1500ms 覆盖异步检测句首。 */
   const trimPrePad = (): void => {
+    const limitMs = vadSegmentation ? VAD_PRE_PAD_MS : PRE_PAD_MS
     let total = 0
     let cut = 0
     for (let i = prePad.length - 1; i >= 0; i--) {
       total += (prePad[i].length / SAMPLE_RATE) * 1000
-      if (total > PRE_PAD_MS) {
+      if (total > limitMs) {
         cut = i + 1
         break
       }
@@ -735,7 +832,8 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
   /** 定稿当前段：POST final=1（含 0.5s 尾垫由 host 补齐协议侧不需要）。
    *  force=true：绕过播放门（仅用于「播放前开着的真人声段在播放开始后收口」——
    *  段内全是播放前语音，无回声风险；见 handleAudio 播放门分支）。 */
-  const finalizeSegment = (force = false): void => {
+  /** cutSamples 仅用于 VAD：提交已确认头部，未确认尾部转入下一段 prePad。 */
+  const finalizeSegment = (force = false, cutSamples?: number): void => {
     if (segment.length === 0) return
     // 根治自聊：AI 朗读中的 finalize（由 VAD/上限/强制非 hold 触发）一律丢弃，
     // 防「TTS→回声→入段→autoSend」路径下的绕后发送。hold 松手（forcePending）明确
@@ -751,11 +849,18 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     // 本次定稿所属的埋点轮次（final-ready 的过期判定用；见 telemetryRound 声明）。
     const myRound = telemetryRound
     // P1-4：定稿 = 最后一个增量包打 final 标记（只传尚未上传的部分；可为空包）。
-    const from = uploadedSamples
-    const samples = sliceSince(from)
-    // I2 修复：清段前保留段引用（chunk 数组不可变，零额外内存）——
-    // 403 恢复时 host 流已被 reset，需从 0 全量重发，否则定稿缺前半句。
-    const recoverySegment = segment
+    const totalSamples = chunkSamples(segment)
+    const requestedCut = cutSamples === undefined ? totalSamples : Math.max(0, Math.min(totalSamples, Math.floor(cutSamples)))
+    // 若 RMS 故障回退期间已上传更多音频，切割不得倒退到 Host 已接收的位置之前。
+    const cut = Math.max(requestedCut, Math.min(uploadedSamples, totalSamples))
+    if (cut === 0) return
+    const parts = splitChunks(segment, cut)
+    const recoverySegment = parts.head
+    const retainedTail = vadSegmentation ? parts.tail : []
+    const finalSamples = chunkSamples(recoverySegment)
+    const finalDurationMs = (finalSamples / SAMPLE_RATE) * 1000
+    const from = Math.min(uploadedSamples, finalSamples)
+    const samples = sliceChunks(recoverySegment, from)
     // 对抗性审查 Fix：epoch 用「本段」世代快照（递增前）；本段是否作废按弃段令牌（discardGen）判定。
     const epochSnapshot = segmentEpoch
     segmentEpoch++
@@ -789,7 +894,8 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     speechActive = false
     silenceMs = 0
     segmentMs = 0
-    prePad = []
+    prePad = retainedTail
+    if (prePad.length > 0) trimPrePad()
     setState('transcribing')
     void (async () => {
       emitTelemetry('submitted') // P1-5：定稿上传发起
@@ -945,6 +1051,8 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
           // 保序发射：并发定稿（A 慢、B 快）时按定稿序号排队，先说的先发（语序不乱）。
           settle({ text: finalText, meta })
         } else {
+          // 只记录序号和时长，不记录音频或文本；用于区分“模型空结果”与采集漏句。
+          console.warn(`[dsh-meetscribe] final returned empty text (seq=${mySeq}, audioMs=${Math.round(finalDurationMs)})`)
           // 空文本：不得 emit，但必须落定该序号——否则保序游标被卡，后续定稿永不发射。
           settle(null)
           if (consumedWake && active && !speechActive && !holdActive) {
@@ -958,6 +1066,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
       }
       // 3 次重试耗尽仍失败：触发 onError → 状态条「识别失败，请重试」（防静默丢句）。
       // M6：耗尽同属「结果落定」——统一 restore 一次（重试间隙一直是 transcribing）。
+      console.warn(`[dsh-meetscribe] final failed after ${MAX_FINAL_ATTEMPTS} attempts (seq=${mySeq}, audioMs=${Math.round(finalDurationMs)})`)
       restoreState()
       settle(null) // 重试耗尽：不得 emit（落定该序号，避免保序游标被卡）
       emitError('recognitionFail')
@@ -1018,6 +1127,7 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     }
     const frameValid = nonFinite === 0
     const durationMs = (data.length / SAMPLE_RATE) * 1000
+    captureSamples += data.length
 
     for (const fn of levelListeners) {
       try {
@@ -1081,8 +1191,8 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         playingTail: playingNow,
       })
     }
-    // hold 模式打断走显式手势（按住），不走 VAD 检测通道；toggle 模式保留检测通道。
-    if (playingNow && !holdActive && config.mode !== 'hold') {
+    // 会议 VAD 连续检测；其他交互仍只在播放期启用该通道。
+    if ((playingNow || vadSegmentation) && !holdActive && config.mode !== 'hold') {
       detectChunks.push(data)
       // Issue #15 批 1（ADR-0012）：同帧入预录环（打断抢救种子）。与 detectChunks
       // 同信号（AEC 后 data）、同条件；hardBreak 时取「语音起始-250ms」起并入新段。
@@ -1168,6 +1278,16 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         prePad.push(data)
         trimPrePad()
       }
+    } else if (vadSegmentation && vadReady) {
+      // VAD 健康时 RMS 完全不参与开段：低音量语音由 applyMeetingVad 异步开段。
+      if (speechActive) {
+        segmentMs += durationMs
+        segment.push(data)
+        if (segmentMs > MAX_SEGMENT_MS) finalizeSegment()
+      } else {
+        prePad.push(data)
+        trimPrePad()
+      }
     } else if (rms > SPEECH_RMS) {
       // 根治自聊：AI 朗读期间 VAD 入段丢弃（回声经 AEC 残留仍超 threshold 会被误识为语音）。
       // 此分支已天然排除 hold（前 if(holdActive)），故无需再判——hold 是明确意图。
@@ -1184,17 +1304,24 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
       } else {
         if (!speechActive) {
           speechActive = true
-          // 打断根治：新一轮人声开始，清残留检测帧（上一播放窗口未发送的尾部已无意义）；
-          // 代际递增作废跨边界在途响应（防 detectSent 水位毒化）。
-          detectChunks = []
-          detectSent = 0
-          detectGeneration++
+          // 连续会议 VAD 不能在 ASR 段边界清空；RMS 交互保留既有重置。
+          if (!vadSegmentation) {
+            detectChunks = []
+            detectSent = 0
+            detectGeneration++
+          }
+          if (vadSegmentation) {
+            const seededSamples = chunkSamples(prePad)
+            segmentStartSample = Math.max(0, captureSamples - seededSamples - data.length)
+            lastVadSpeechSample = captureSamples
+          }
           // P1-5：新一轮语音开始，复位「说完」标记（下一轮 chain 重新起算）。
           utteranceEndAt = null
           setState('speech')
           for (const p of prePad) segment.push(p)
           prePad = []
         }
+        if (vadSegmentation) lastVadSpeechSample = captureSamples
         speechMs += durationMs
         segmentMs += durationMs
         silenceMs = 0
@@ -1219,6 +1346,9 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
         if (speechMs >= MIN_SPEECH_MS) {
           finalizeSegment()
         } else {
+          if (vadSegmentation) {
+            console.warn(`[dsh-meetscribe] RMS fallback discarded a short segment (speechMs=${Math.round(speechMs)})`)
+          }
           // P1-3：语音不足 250ms（短促噪声/误触）：放弃本段，不发送。
           segmentEpoch++ // I4：作废在途 partial 响应（防其推进 uploadedSamples 水位错乱）
           discardGen++ // 弃段令牌推进：作废在途定稿（短噪声弃段不得 emit）
@@ -1250,7 +1380,19 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
       // 此前无论请求是否被在途标志挡下都推进 lastPollAt——一次超过 128ms 的往返会连着
       // 吃掉后续整拍，把观测栅格量化到 RTT 向上取整的 128ms 倍数（实测停顿 449/758ms）。
       // 改后：在途期间不推进，请求一回来，下一帧（≤64ms）立即补发。
-      if (playingNow && !speechActive && !holdActive) {
+      if (vadSegmentation && !holdActive) {
+        // 会议需要持续 VAD；已有语音段同时刷新 ASR partial，两个请求互不阻塞。
+        let scheduled = false
+        if (!detectInFlight) {
+          scheduled = true
+          void requestDetect()
+        }
+        if (speechActive && !partialInFlight) {
+          scheduled = true
+          void requestPartial()
+        }
+        if (scheduled) lastPollAt = nowMs
+      } else if (playingNow && !speechActive && !holdActive) {
         // 打断根治：朗读中优先检测通道。
         if (!detectInFlight) {
           lastPollAt = nowMs
@@ -1445,6 +1587,12 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
     detectChunks = [] // 打断根治：退出清检测通道
     detectSent = 0
     detectGeneration++
+    captureSamples = 0
+    detectAckSamples = 0
+    segmentStartSample = 0
+    lastVadSpeechSample = 0
+    vadReady = false
+    vadFallbackNotified = false
     // Issue #15 批 1（ADR-0012）：退出清预录环（防跨会话残留抢救种子）。
     preRoll = []
     preRollMs = 0
@@ -1538,6 +1686,12 @@ export function createAsrEngine(config: AsrConfig, sessionId: string): AsrEngine
       detectChunks = [] // 打断根治：进入清检测通道
       detectSent = 0
       detectGeneration++
+      captureSamples = 0
+      detectAckSamples = 0
+      segmentStartSample = 0
+      lastVadSpeechSample = 0
+      vadReady = false
+      vadFallbackNotified = false
       // Issue #15 批 1（ADR-0012）：进入清预录环与抢救标记。
       preRoll = []
       preRollMs = 0

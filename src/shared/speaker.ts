@@ -42,7 +42,19 @@ function normalized(values: ArrayLike<number>): Float32Array {
 export class SpeakerClusterer {
   private readonly centroids = new Map<string, SpeakerCentroid>()
 
-  constructor(private readonly threshold = 0.56, private readonly maxSpeakers = 8) {}
+  private threshold: number
+  private maxSpeakers: number
+
+  constructor(threshold = 0.65, maxSpeakers = 8) {
+    this.threshold = threshold
+    this.maxSpeakers = maxSpeakers
+  }
+
+  /** Apply settings changes to an existing meeting without discarding its voice history. */
+  configure(threshold: number, maxSpeakers: number): void {
+    this.threshold = threshold
+    this.maxSpeakers = maxSpeakers
+  }
 
   reset(): void {
     this.centroids.clear()
@@ -75,11 +87,17 @@ export class SpeakerClusterer {
     }
 
     if (!best) throw new Error('Speaker cluster invariant violated')
-    best.count += 1
-    for (let i = 0; i < best.vector.length; i++) {
-      best.vector[i] = best.vector[i] + (vector[i] - best.vector[i]) / best.count
+    // A borderline match may be the first sample of a different voice. Keep its
+    // label for this segment, but do not pull the established centroid toward
+    // it; otherwise one mistaken merge makes every later utterance merge too.
+    const updateThreshold = Math.max(0.72, this.threshold + 0.06)
+    if (confidence >= updateThreshold) {
+      best.count += 1
+      for (let i = 0; i < best.vector.length; i++) {
+        best.vector[i] = best.vector[i] + (vector[i] - best.vector[i]) / best.count
+      }
+      best.vector = normalized(best.vector)
     }
-    best.vector = normalized(best.vector)
     return { speakerId: best.id, confidence, isNew: false }
   }
 

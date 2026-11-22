@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client'
-import type { Meeting } from '../shared/types.ts'
+import type { Meeting, MinutesTask } from '../shared/types.ts'
 import { DEFAULT_SETTINGS } from '../shared/types.ts'
 import { MeetingApp } from './meeting.tsx'
 import { MeetingSettings } from './settings.tsx'
@@ -20,7 +20,7 @@ const meeting: Meeting = {
   segments: [
     { id: 's1', meetingId: 'preview', speakerId: 'speaker-1', source: 'microphone', startMs: 74000, endMs: 81000, rawText: '今天主要确认本地识别、说话人管理和 Word 输出这三项。', displayText: '今天主要确认本地识别、说话人管理和 Word 输出这三项。', revision: 1, status: 'final', createdAt: now, updatedAt: now },
     { id: 's2', meetingId: 'preview', speakerId: 'speaker-2', source: 'microphone', startMs: 89000, endMs: 99000, rawText: '中文和中英混合识别已经完成联调，嗯，句末停顿后会自动定稿。', displayText: '中文和中英混合识别已经完成联调，句末停顿后会自动定稿。', revision: 1, status: 'final', createdAt: now, updatedAt: now },
-    { id: 's3', meetingId: 'preview', speakerId: 'speaker-3', source: 'microphone', startMs: 108000, endMs: 119000, rawText: '纪要保留原始逐字稿，只有用户点击生成时才调用大模型。', displayText: '纪要保留原始逐字稿，只有用户点击生成时才调用大模型。', revision: 1, status: 'final', createdAt: now, updatedAt: now },
+    { id: 's3', meetingId: 'preview', speakerId: 'speaker-3', source: 'microphone', startMs: 108000, endMs: 119000, rawText: '会议文本只在生成 Word 或主动发送 DSH 草稿时交给大模型。', displayText: '会议文本只在生成 Word 或主动发送 DSH 草稿时交给大模型。', revision: 1, status: 'final', createdAt: now, updatedAt: now },
   ],
   vocabulary: [],
   generatedFiles: [
@@ -34,13 +34,57 @@ const weekly: Meeting = {
   generatedFiles: [{ path: 'C:\\Users\\you\\Documents\\MeetScribe\\十一月研发周会-v1.docx', version: 1, createdAt: '2026-11-19T01:00:00.000Z' }],
 }
 
+const previewTask: MinutesTask = {
+  id: 'preview-task', meetingId: 'preview', meetingTitle: meeting.title, status: 'running', stage: 'model', progress: 45, receivedChars: 768, reasoningChars: 1024,
+  createdAt: '2026-11-21T02:29:50.000Z', updatedAt: now,
+}
+const failedTask: MinutesTask = {
+  ...previewTask, id: 'failed-task', status: 'failed', progress: 45, error: '大模型请求失败（AUTH）：合成测试凭据被拒绝',
+}
+const completedTask: MinutesTask = {
+  ...previewTask, id: 'completed-task', status: 'completed', stage: 'completed', progress: 100, receivedChars: 1842, version: 2,
+}
+function previewTasks(): MinutesTask[] {
+  const currentView = (globalThis as unknown as { meetScribeGalleryView?: string }).meetScribeGalleryView
+  if (currentView === 'workspace') return [previewTask]
+  if (currentView === 'workspace-tasks') return [failedTask, completedTask]
+  return []
+}
+
+let previewSettings = { ...DEFAULT_SETTINGS, outputDir: 'C:\\Users\\you\\Documents\\MeetScribe' }
+const previewMinutesModels = {
+  current: { provider: 'synthetic', model: 'minutes-reasoning', reasoningEffort: 'standard' },
+  options: [
+    {
+      provider: 'synthetic', providerName: '合成 Provider', model: 'minutes-fast', name: '快速纪要模型',
+      reasoningEfforts: [], defaultReasoningEffort: undefined,
+    },
+    {
+      provider: 'synthetic', providerName: '合成 Provider', model: 'minutes-reasoning', name: '深思纪要模型',
+      reasoningEfforts: [
+        { id: 'standard', name: '标准' },
+        { id: 'high', name: '深入' },
+      ],
+      defaultReasoningEffort: 'standard',
+    },
+  ],
+  errors: [],
+}
+
 globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const path = String(input)
   if (path.endsWith('/meetings') && init?.method === 'DELETE') return Response.json({ ok: true })
+  if (path.endsWith('/minutes-tasks')) return Response.json(previewTasks())
+  if (path.includes('/generate')) return Response.json({ ...failedTask, id: 'retry-task', status: 'running', stage: 'preparing', progress: 0, receivedChars: 0, error: undefined, version: undefined }, { status: 202 })
+  if (path.includes('/conversation-prompt')) return Response.json({ prompt: '合成会议提示词' })
   if (path.includes('/models/status')) return Response.json({ asr: { ready: true, loaded: true, files: [{ exists: true }] }, vad: { ready: true, loaded: true }, speaker: { ready: true } })
+  if (path.endsWith('/minutes-models')) return Response.json(previewMinutesModels)
   if (path.includes('/clear')) return Response.json({ ...meeting, id: 'preview-cleared', status: 'paused', speakers: [], segments: [] })
-  if (path.includes('/settings') && init?.method === 'PUT') return Response.json({ ...DEFAULT_SETTINGS, ...JSON.parse(String(init.body)), outputDir: 'C:\\Users\\you\\Documents\\MeetScribe' })
-  if (path.includes('/settings')) return Response.json({ ...DEFAULT_SETTINGS, outputDir: 'C:\\Users\\you\\Documents\\MeetScribe' })
+  if (path.includes('/settings') && init?.method === 'PUT') {
+    previewSettings = { ...previewSettings, ...JSON.parse(String(init.body)) }
+    return Response.json(previewSettings)
+  }
+  if (path.includes('/settings')) return Response.json(previewSettings)
   return Response.json(path.endsWith('/meetings') ? [meeting, weekly] : meeting)
 }
 globalThis.EventSource = class { addEventListener(): void {} close(): void {} } as unknown as typeof EventSource
@@ -58,7 +102,7 @@ body{margin:0;background:#eaf1f8;font-family:"Segoe UI","Microsoft YaHei UI",san
 document.head.appendChild(style)
 document.body.innerHTML = '<div class="gallery-shell"><div id="root"></div><div class="gallery-caption">MEETSCRIBE · LOCAL MEETING NOTES</div></div>'
 const view = (globalThis as unknown as { meetScribeGalleryView?: string }).meetScribeGalleryView
-const workspace = view === 'workspace' || view === 'workspace-settings'
+const workspace = view === 'workspace' || view === 'workspace-settings' || view === 'workspace-tasks'
 ;(globalThis as unknown as { meetScribeGalleryController?: typeof meetings }).meetScribeGalleryController = meetings
 if (view === 'settings' || workspace) document.querySelector('.gallery-caption')?.remove()
 void meetings.init().then(() => {

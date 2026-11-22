@@ -134,7 +134,7 @@ test('Local VAD detect uses native frame probabilities and resets sessions', asy
     }),
   })
   t.after(() => runtime.dispose())
-  assert.deepEqual(await runtime.detect('meeting', new Float32Array(1600)), { isSpeech: true })
+  assert.deepEqual(await runtime.detect('meeting', new Float32Array(1600)), { isSpeech: true, available: true })
   assert.equal(runtime.modelStatus().vad.ready, true)
   runtime.reset('meeting')
   await tick()
@@ -193,14 +193,14 @@ test('replaced Local VAD model disposes old sessions and reloads', async (t) => 
     },
   })
   t.after(() => runtime.dispose())
-  assert.deepEqual(await runtime.detect('meeting', new Float32Array(1600)), { isSpeech: true })
+  assert.deepEqual(await runtime.detect('meeting', new Float32Array(1600)), { isSpeech: true, available: true })
   assert.equal(await runtime.retryModel('vad'), true)
   assert.equal(loads, 1)
   assert.equal(await runtime.retryModel('vad', true), true)
   assert.equal(loads, 2)
   assert.deepEqual(disposedSessions, [1])
   assert.deepEqual(disposedModels, [1])
-  assert.deepEqual(await runtime.detect('meeting', new Float32Array(1600)), { isSpeech: true })
+  assert.deepEqual(await runtime.detect('meeting', new Float32Array(1600)), { isSpeech: true, available: true })
 })
 
 test('missing Local model gives an actionable error without invoking the loader', async (t) => {
@@ -214,6 +214,7 @@ test('missing Local model gives an actionable error without invoking the loader'
   }, { loadAsrModel: async () => { loads++; return fakeAsrModel(async () => ({ text: '' })) } })
   t.after(() => runtime.dispose())
   await assert.rejects(runtime.feed('meeting', new Float32Array(8000), false, 0, 0), /未找到本地识别模型/)
+  assert.deepEqual(await runtime.detect('meeting', new Float32Array(1600)), { isSpeech: false, available: false })
   assert.equal(loads, 0)
 })
 

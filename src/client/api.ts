@@ -1,4 +1,4 @@
-import type { Meeting, MeetScribeSettings } from '../shared/types.ts'
+import type { Meeting, MeetScribeSettings, MinutesModelCatalog, MinutesTask } from '../shared/types.ts'
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
@@ -27,7 +27,10 @@ export const api = {
   rename: (id: string, speakerId: string, name: string) => request<Meeting>(`/meetings/${encodeURIComponent(id)}/speakers/${encodeURIComponent(speakerId)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   merge: (id: string, sourceId: string, targetId: string) => request<Meeting>(`/meetings/${encodeURIComponent(id)}/speakers/merge`, { method: 'POST', body: JSON.stringify({ sourceId, targetId }) }),
   reassign: (id: string, segmentId: string, speakerId: string) => request<Meeting>(`/meetings/${encodeURIComponent(id)}/segments/${encodeURIComponent(segmentId)}/speaker`, { method: 'POST', body: JSON.stringify({ speakerId }) }),
-  generate: (id: string) => request<Meeting>(`/meetings/${encodeURIComponent(id)}/generate`, { method: 'POST', body: '{}' }),
+  generate: (id: string) => request<MinutesTask>(`/meetings/${encodeURIComponent(id)}/generate`, { method: 'POST', body: '{}' }),
+  conversationPrompt: (id: string) => request<{ prompt: string }>(`/meetings/${encodeURIComponent(id)}/conversation-prompt`, { method: 'POST', body: '{}' }),
+  minutesTasks: () => request<MinutesTask[]>('/minutes-tasks'),
+  minutesModels: () => request<MinutesModelCatalog>('/minutes-models'),
   settings: () => request<MeetScribeSettings>('/settings'),
   saveSettings: (settings: Partial<MeetScribeSettings>) => request<MeetScribeSettings>('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   selectOutputDirectory: () => request<{ path: string | null }>('/settings/select-directory', { method: 'POST', body: '{}' }),

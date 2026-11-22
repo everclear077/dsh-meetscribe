@@ -63,6 +63,17 @@ await light.locator('.ms-notice').filter({ hasText: '已清空全部历史会议
 if (await light.locator('.ms-history-item').count()) throw new Error('Clear history did not remove every meeting.')
 await light.close()
 
+const conversationHandoff = await galleryPage('light')
+await conversationHandoff.evaluate(() => {
+  window.__meetingPrompts = []
+  window.meetScribeGalleryController.setConversationHandoff((prompt) => window.__meetingPrompts.push(prompt))
+})
+await conversationHandoff.getByRole('button', { name: '在 DSH 对话中整理', exact: true }).click()
+await conversationHandoff.waitForFunction(() => window.__meetingPrompts?.length === 1)
+const handoffState = await conversationHandoff.evaluate(() => ({ prompts: window.__meetingPrompts, open: window.meetScribeGalleryController.getSnapshot().open }))
+if (handoffState.prompts[0] !== '合成会议提示词' || handoffState.open) throw new Error('Conversation handoff did not leave a complete draft and close the floating window.')
+await conversationHandoff.close()
+
 const dark = await galleryPage('dark')
 await dark.screenshot({ path: 'docs/images/floating-transcript-dark.png', fullPage: true })
 await dark.getByTitle('最小化').click()
@@ -106,9 +117,11 @@ if (downloadHref !== '/meetscribe/meetings/preview/documents/2') throw new Error
 await workspaceLight.getByRole('button', { name: '刷新文件列表', exact: true }).click()
 if (await workspaceLight.locator('.ms-document-row').count() !== 3) throw new Error('Refreshing the document library changed its contents unexpectedly.')
 await workspaceLight.screenshot({ path: 'docs/images/workspace-documents-light.png', fullPage: true })
-await workspaceLight.getByRole('button', { name: '识别设置', exact: true }).click()
+if (await workspaceLight.locator('.ms-generation-task.is-running').count() !== 1) throw new Error('Workspace does not show the running generation task.')
+if (!await workspaceLight.getByText('正在接收模型正文，已收到 768 个字符', { exact: true }).count()) throw new Error('Model streaming progress is not visible.')
+await workspaceLight.getByRole('button', { name: /识别设置/ }).click()
 await workspaceLight.locator('.ms-settings').waitFor()
-await workspaceLight.getByRole('button', { name: '纪要文件', exact: true }).click()
+await workspaceLight.getByRole('button', { name: /纪要文件/ }).click()
 await workspaceLight.locator('.ms-document-list').waitFor()
 await workspaceLight.close()
 
@@ -125,7 +138,19 @@ const narrowLayout = await workspaceNarrow.evaluate(() => ({
   downloadVisible: !!document.querySelector('.ms-document-download')?.getBoundingClientRect().width,
 }))
 if (narrowLayout.documentWidth > narrowLayout.viewport || narrowLayout.workspaceWidth > narrowLayout.viewport || !narrowLayout.downloadVisible) throw new Error(`Narrow workspace layout overflows: ${JSON.stringify(narrowLayout)}`)
+if (await workspaceNarrow.locator('.ms-generation-task.is-running').count() !== 1) throw new Error('Running task disappears in the narrow workspace.')
+await workspaceNarrow.screenshot({ path: 'docs/images/workspace-tasks-narrow.png', fullPage: true })
 await workspaceNarrow.close()
+
+const workspaceTasks = await galleryPage('light', 'workspace-tasks')
+if (!await workspaceTasks.getByText('大模型请求失败（AUTH）：合成测试凭据被拒绝', { exact: true }).count()) throw new Error('Generation failure detail is not shown in the workspace.')
+const completedDownload = workspaceTasks.getByRole('link', { name: '下载 Word', exact: true })
+if (await completedDownload.getAttribute('href') !== '/meetscribe/meetings/preview/documents/2') throw new Error('Completed task does not download its generated Word version.')
+await workspaceTasks.screenshot({ path: 'docs/images/workspace-task-states-light.png', fullPage: true })
+await workspaceTasks.getByRole('button', { name: '重试生成', exact: true }).click()
+await workspaceTasks.locator('.ms-generation-task.is-running').waitFor()
+if (await workspaceTasks.getByRole('button', { name: '重试生成', exact: true }).count()) throw new Error('Retry did not replace the failed task with a running task.')
+await workspaceTasks.close()
 
 async function checkWorkspaceSettings(theme) {
   const page = await galleryPage(theme, 'workspace-settings', 1400)
@@ -139,21 +164,45 @@ async function checkWorkspaceSettings(theme) {
   }
   if (!await page.getByText('transcribe.cpp 0.4.1', { exact: false }).count()) throw new Error('Local model description is stale.')
   if (!await page.getByText('ERes2NetV2 声纹', { exact: false }).count()) throw new Error('Speaker model description is stale.')
+  const minutesModelSelect = page.getByLabel('纪要模型', { exact: true })
+  if (await minutesModelSelect.inputValue() !== '') throw new Error('Minutes model should follow the DSH default by default.')
+  if (await page.getByLabel('模型无响应超时', { exact: true }).inputValue() !== '300000') throw new Error('Default model idle timeout is not five minutes.')
   const silenceInput = page.locator('input[type="number"]')
   if (await silenceInput.inputValue() !== '800') throw new Error('Default silence is not 800 ms.')
   const speakerThresholdInput = page.locator('input[type="range"]')
-  if (await speakerThresholdInput.inputValue() !== '0.56') throw new Error('Default speaker threshold is not 0.56.')
+  if (await speakerThresholdInput.inputValue() !== '0.65') throw new Error('Default speaker threshold is not 0.65.')
   if (theme === 'light') {
+    await minutesModelSelect.selectOption(JSON.stringify(['synthetic', 'minutes-reasoning']))
+    const reasoningSelect = page.getByLabel('纪要推理强度', { exact: true })
+    await reasoningSelect.selectOption('high')
+    await page.getByLabel('模型无响应超时', { exact: true }).selectOption('600000')
+    await page.getByRole('button', { name: '刷新纪要模型列表', exact: true }).click()
+    if (await minutesModelSelect.locator('option').count() !== 3) throw new Error('DSH conversation model catalog is not shown in settings.')
+    if (await minutesModelSelect.locator('optgroup').count() !== 1) throw new Error('DSH provider grouping is not preserved.')
+    if (await minutesModelSelect.locator('optgroup').getAttribute('label') !== '合成 Provider') throw new Error('DSH provider group label is not preserved.')
+    if (await reasoningSelect.inputValue() !== 'high') throw new Error('Reasoning effort selection was not preserved.')
     await page.getByLabel('行业术语纠正表').fill('OKR = 欧凯尔 | 欧 k 尔\nAPI = 阿皮')
     await page.getByRole('button', { name: '保存术语表', exact: true }).click()
     await page.locator('.ms-notice').filter({ hasText: '术语表已保存，共 2 条' }).waitFor()
     if (!/OKR = 欧凯尔 \| 欧 k 尔/.test(await page.getByLabel('行业术语纠正表').inputValue())) throw new Error('Terminology editor did not preserve the saved rules.')
   }
+  await page.locator('.ms-workspace-settings').evaluate((element) => element.scrollTo({ top: 0 }))
   await page.screenshot({ path: `docs/images/settings-${theme}.png`, fullPage: true })
   await page.close()
 }
 await checkWorkspaceSettings('light')
 await checkWorkspaceSettings('dark')
+
+const settingsNarrow = await galleryPage('light', 'workspace-settings', 760)
+await settingsNarrow.setViewportSize({ width: 360, height: 760 })
+const narrowSettings = await settingsNarrow.evaluate(() => ({
+  viewport: window.innerWidth,
+  documentWidth: document.documentElement.scrollWidth,
+  settingsWidth: document.querySelector('.ms-settings')?.scrollWidth,
+  modelSelectWidth: document.querySelector('select[aria-label="纪要模型"]')?.getBoundingClientRect().width,
+}))
+if (narrowSettings.documentWidth > narrowSettings.viewport || narrowSettings.settingsWidth > narrowSettings.viewport || !narrowSettings.modelSelectWidth) throw new Error(`Narrow model settings overflow: ${JSON.stringify(narrowSettings)}`)
+await settingsNarrow.close()
 
 await browser.close()
 if (errors.length) throw new Error(errors.join('\n'))
